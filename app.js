@@ -1,11 +1,14 @@
 // ============================================================================
-// Panel Super Admin v1 — Mode Demo
+// Panel Super Admin v2 — Wizard "Hubungkan Supabase"
 // ----------------------------------------------------------------------------
 // Login Bos saja via Supabase Auth (proyek ZPOS Bos). TIDAK ada signup.
-// Registry toko demo disimpan di localStorage browser Bos saja.
-// Provisioning + update di v1 ini SIMULASI langkah-demi-langkah — proyek
-// Supabase / repo sungguhan belum dibuat (butuh backend + token Management
-// API + akun Supabase pembeli yang dibuat manual).
+// Registry toko disimpan di localStorage browser Bos saja.
+// Wizard v2 BENAR-BENAR memanggil API Supabase + GitHub dari browser Bos
+// (buat proyek / pasang skema / buat repo / deploy) dengan token yang
+// ditempel Bos di form. Token HANYA hidup di memori selama wizard jalan —
+// TIDAK PERNAH ditulis ke localStorage, file, atau repo; dibersihkan saat
+// selesai / batal / keluar. "Update Semua Toko" masih simulasi sampai
+// backend ada.
 // ============================================================================
 'use strict';
 
@@ -52,6 +55,550 @@ var LANGKAH_UPDATE = [
   { id: 'migrasi-db', label: 'Migrasi database' },
   { id: 'deploy-app', label: 'Deploy aplikasi' }
 ];
+
+// --- Wizard "Hubungkan Supabase" (v2) ---------------------------------------
+// Semua panggilan API berjalan dari BROWSER Bos. Token (sbp_ + GitHub) hanya
+// hidup di memori selama wizard jalan — TIDAK PERNAH ditulis ke localStorage,
+// file, atau repo; dibersihkan saat selesai / batal / keluar. Log wizard
+// tidak pernah menampilkan isi token.
+// ----------------------------------------------------------------------------
+var API_SUPABASE = 'https://api.supabase.com/v1';
+var API_GITHUB = 'https://api.github.com';
+var LIVE_ZPOS = 'https://zhopos.github.io/';
+var REGION_TOKO = 'ap-southeast-1'; // Singapore
+
+var SCHEMA_DATA = (typeof window !== 'undefined' && window.SCHEMA_DATA)
+  || (typeof globalThis !== 'undefined' && globalThis.SCHEMA_DATA)
+  || (function () { try { return require('./schema-data.js'); } catch (e) { return null; } })()
+  || null;
+
+function skemaData() {
+  if (!SCHEMA_DATA) throw new Error('schema-data.js tidak termuat — jalankan node gen-schema-data.js lalu muat ulang panel.');
+  return SCHEMA_DATA;
+}
+
+// Urutan langkah wizard (URUTAN PENTING — jangan diubah sembarangan).
+var LANGKAH_WIZARD = [
+  { id: 'validasi', label: 'Validasi isian (nama, slug, token)' },
+  { id: 'buat-proyek', label: 'Buat proyek Supabase baru (mode baru saja)' },
+  { id: 'tes-koneksi', label: 'Tes koneksi ke Supabase' },
+  { id: 'pasang-skema-1', label: 'Pasang skema — bagian 1/2 (37 tabel + RLS)' },
+  { id: 'pasang-skema-2', label: 'Pasang skema — bagian 2/2 (seed + grant)' },
+  { id: 'verifikasi-tabel', label: 'Verifikasi jumlah tabel (harus ≥ 37)' },
+  { id: 'migrasi-cabang', label: 'Migrasi v4-41 (cabang_id pelanggan/pemasok)' },
+  { id: 'migrasi-desimal', label: 'Migrasi desimal v4-45 (qty pecahan)' },
+  { id: 'ambil-kunci', label: 'Ambil publishable key proyek' },
+  { id: 'buat-repo', label: 'Buat repo GitHub zhopos/<slug>' },
+  { id: 'salin-file', label: 'Salin file aplikasi v4-45 + config.js' },
+  { id: 'aktifkan-pages', label: 'Aktifkan GitHub Pages' },
+  { id: 'selesai', label: 'Selesai — simpan toko + tampilkan link' }
+];
+
+// File aplikasi yang disalin dari situs live ZPOS Bos (selalu versi terbaru).
+// 'teks' di-fetch sebagai teks, 'biner' sebagai arrayBuffer → base64.
+// config.js TIDAK di-fetch — dibuat wizard dari URL + key toko itu.
+var FILE_APLIKASI = [
+  { path: 'index.html', jenis: 'teks', wajib: true },
+  { path: 'app.js', jenis: 'teks', wajib: true },
+  { path: 'supabase.js', jenis: 'teks', wajib: true },
+  { path: 'sw.js', jenis: 'teks', wajib: true },
+  { path: 'manifest.webmanifest', jenis: 'teks', wajib: false },
+  { path: 'icon-192.png', jenis: 'biner', wajib: false },
+  { path: 'icon-512.png', jenis: 'biner', wajib: false },
+  { path: 'apple-touch-icon.png', jenis: 'biner', wajib: false }
+];
+
+function daftarFileAplikasi() {
+  return FILE_APLIKASI.map(function (f) { return { path: f.path, jenis: f.jenis, wajib: !!f.wajib }; });
+}
+
+function tungguMs(ms) {
+  return new Promise(function (r) { setTimeout(r, ms); });
+}
+
+function refDariUrl(url) {
+  var m = String(url || '').trim().match(/^https:\/\/([a-z0-9-]+)\.supabase\.co\/?$/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function urlDariRef(ref) {
+  return 'https://' + String(ref || '').trim().toLowerCase() + '.supabase.co';
+}
+
+// Validasi semua isian wizard SEBELUM request apa pun. mode: 'ada' | 'baru'.
+// f: {projectUrl, publishableKey, sbpToken, githubToken, namaProyek, orgSlug, dbPass}
+function validasiKoneksi(mode, f) {
+  var errors = [];
+  f = f || {};
+  if (mode !== 'ada' && mode !== 'baru') {
+    return { ok: false, errors: ['Mode koneksi tidak dikenal — pilih "Proyek sudah ada" atau "Buat proyek baru".'] };
+  }
+  var ref = null;
+  if (mode === 'ada') {
+    ref = refDariUrl(f.projectUrl);
+    if (!ref) errors.push('Project URL tidak valid — harus https://<ref>.supabase.co (contoh: https://abcdefghijklm.supabase.co).');
+    if (!/^sb_publishable_/.test(f.publishableKey || '')) errors.push('Publishable key tidak valid — harus diawali sb_publishable_ (salin dari Settings → API Keys → Publishable key).');
+  } else {
+    if (!String(f.namaProyek || '').trim()) errors.push('Nama proyek Supabase wajib diisi.');
+    if (!String(f.orgSlug || '').trim()) errors.push('Organization slug/ID wajib diisi (lihat di URL dashboard Supabase: supabase.com/dashboard/org/<slug>).');
+    if (String(f.dbPass || '').length < 12) errors.push('Password database minimal 12 karakter — simpan baik-baik, tidak bisa dilihat lagi nanti.');
+  }
+  if (!/^sbp_/.test(f.sbpToken || '')) errors.push('Management API token tidak valid — harus diawali sbp_ (buat di dashboard Supabase → Access Tokens).');
+  if (!/^(ghp_|github_pat_|gho_)/.test(f.githubToken || '')) errors.push('Token GitHub tidak valid — harus token classic (ghp_…) atau fine-grained (github_pat_…) dengan scope repo.');
+  if (errors.length) return { ok: false, errors: errors };
+  return { ok: true, errors: [], ref: ref, projectUrl: mode === 'ada' ? urlDariRef(ref) : null };
+}
+
+// config.js toko baru — format SAMA PERSIS dengan config.js ZPOS (const).
+// Hanya berisi URL + publishable key toko itu; tanpa secret apa pun.
+function buatConfigToko(projectUrl, publishableKey) {
+  return '// ============================================================\n'
+    + '// ZPOS v4 — Konfigurasi (dibuat otomatis oleh Panel Super Admin)\n'
+    + '// Yang ada di sini hanya ANON KEY (kunci publik, aman untuk\n'
+    + '// aplikasi frontend). JANGAN PERNAH menempel SERVICE_ROLE KEY.\n'
+    + '// ============================================================\n'
+    + '\n'
+    + 'const SUPABASE_URL = "' + projectUrl + '";\n'
+    + 'const SUPABASE_ANON_KEY = "' + publishableKey + '";\n';
+}
+
+function pesanDariRes(r) {
+  if (!r) return '';
+  var j = r.json;
+  if (j) {
+    if (typeof j.message === 'string') return j.message;
+    if (typeof j.error === 'string') return j.error;
+    if (j.error && typeof j.error.message === 'string') return j.error.message;
+    if (typeof j.msg === 'string') return j.msg;
+  }
+  var t = String(r.text || '').trim();
+  return t ? t.slice(0, 200) : '';
+}
+
+// Bedakan penyebab gagal koneksi — supaya pesan ke Bos tepat sasaran.
+function klasifikasiGalatKoneksi(x) {
+  var status = (x && x.status) || 0;
+  if (status === 401) return { jenis: 'token', pesan: 'Token Management API ditolak (401) — token salah atau kedaluwarsa. Periksa token sbp_ yang ditempel.' };
+  if (status === 404) return { jenis: 'tidak-ditemukan', pesan: 'Proyek tidak ditemukan (404) — periksa Project URL / ref, dan pastikan token berasal dari akun Supabase yang sama dengan proyek itu.' };
+  if (status === 403) return { jenis: 'token', pesan: 'Token tidak punya akses ke proyek ini (403) — token harus dibuat di akun Supabase yang sama dengan proyek toko.' };
+  if (status === 429) return { jenis: 'server', pesan: 'Terlalu banyak permintaan (429) — tunggu sebentar lalu coba lagi.' };
+  if (status >= 500) return { jenis: 'server', pesan: 'Server Supabase bermasalah (' + status + ') — coba lagi nanti.' };
+  if (status === 0 || (x && x.galat)) {
+    var m = String((x && x.galat && x.galat.message) || (x && x.message) || '');
+    if (/abort/i.test(m)) return { jenis: 'timeout', pesan: 'Permintaan kehabisan waktu (timeout) — periksa koneksi lalu coba lagi.' };
+    return { jenis: 'cors', pesan: 'Browser tidak bisa menghubungi api.supabase.com — kemungkinan diblokir CORS atau tidak ada internet. Periksa koneksi internet, lalu coba lagi. Bila tetap gagal, hubungkan lewat skrip di mesin Bob.' };
+  }
+  var ps = (x && x.pesanServer) || '';
+  return { jenis: 'server', pesan: 'Gagal menghubungi Supabase' + (status ? ' (' + status + ')' : '') + (ps ? ': ' + ps : '.') };
+}
+
+// Ambil publishable key dari jawaban GET /v1/projects/{ref}/api-keys.
+// Bentuk jawaban bisa berubah — tangani: array [{name, api_key}], {keys: [...]},
+// {publishable: 'sb_…'}, atau {api_key: 'sb_…'}.
+function pilihPublishableKey(j) {
+  var arr = null;
+  if (Array.isArray(j)) arr = j;
+  else if (j && Array.isArray(j.keys)) arr = j.keys;
+  else if (j && typeof j.publishable === 'string') return j.publishable;
+  else if (j && typeof j.api_key === 'string') return j.api_key;
+  if (!arr) return null;
+  var pub = null, legacy = null;
+  arr.forEach(function (k) {
+    var key = k && (k.api_key || k.key || '');
+    if (!key) return;
+    if (key.indexOf('sb_publishable_') === 0) {
+      if (!pub || /default/i.test(k.name || '')) pub = key;
+    } else if (key.indexOf('eyJ') === 0 && /anon|default/i.test(k.name || '')) {
+      if (!legacy) legacy = key;
+    }
+  });
+  return pub || legacy;
+}
+
+// Ambil angka hitung tabel dari jawaban endpoint /database/query (SELECT count).
+function ambilHitungTabel(j) {
+  var rows = null;
+  if (Array.isArray(j)) rows = j;
+  else if (j && Array.isArray(j.rows)) rows = j.rows;
+  else if (j && Array.isArray(j.data)) rows = j.data;
+  else if (j && Array.isArray(j.result)) rows = j.result;
+  if (!rows || !rows.length) return null;
+  var r = rows[0];
+  var v = r.jumlah != null ? r.jumlah : (r.count != null ? r.count : r['count(*)']);
+  var n = parseInt(v, 10);
+  return isNaN(n) ? null : n;
+}
+
+function teksKeBase64(str) {
+  if (typeof Buffer !== 'undefined') return Buffer.from(String(str), 'utf8').toString('base64');
+  var bin = unescape(encodeURIComponent(String(str)));
+  var out = '';
+  for (var i = 0; i < bin.length; i += 8192) {
+    out += String.fromCharCode.apply(null, bin.slice(i, i + 8192).split('').map(function (c) { return c.charCodeAt(0); }));
+  }
+  return btoa(out);
+}
+
+function bufferKeBase64(buf) {
+  if (typeof Buffer !== 'undefined') return Buffer.from(buf).toString('base64');
+  var bytes = new Uint8Array(buf);
+  var bin = '';
+  for (var i = 0; i < bytes.length; i += 8192) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  }
+  return btoa(bin);
+}
+
+// Panggilan JSON generik. fetchImpl disuntik supaya sim bisa memakai mock.
+async function panggilJson(url, opt, fetchImpl) {
+  var headers = { 'Content-Type': 'application/json' };
+  if (opt && opt.token) headers.Authorization = 'Bearer ' + opt.token;
+  try {
+    var res = await fetchImpl(url, {
+      method: (opt && opt.method) || 'GET',
+      headers: headers,
+      body: opt && opt.body ? JSON.stringify(opt.body) : undefined
+    });
+    var text = '';
+    try { text = await res.text(); } catch (e) { text = ''; }
+    var json = null;
+    try { json = text ? JSON.parse(text) : null; } catch (e) { json = null; }
+    return { ok: !!res.ok, status: res.status, json: json, text: text };
+  } catch (e) {
+    return { ok: false, status: 0, galat: e, json: null, text: '' };
+  }
+}
+
+async function tesKoneksiSupabase(o, fetchImpl) {
+  var r = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref), { token: o.token }, fetchImpl);
+  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, pesanServer: pesanDariRes(r) };
+  var j = r.json || {};
+  return { ok: true, status: j.status || j.state, nama: j.name, ref: j.ref || j.id };
+}
+
+async function buatProyekSupabase(o, fetchImpl) {
+  var r = await panggilJson(API_SUPABASE + '/projects', {
+    method: 'POST', token: o.token,
+    body: { name: o.nama, organization_id: o.orgSlug, db_pass: o.dbPass, region: REGION_TOKO, plan: 'free' }
+  }, fetchImpl);
+  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, pesanServer: pesanDariRes(r) };
+  var j = r.json || {};
+  var ref = j.ref || j.id;
+  if (!ref) return { ok: false, status: r.status, pesanServer: 'Server tidak mengembalikan ref proyek.' };
+  return { ok: true, ref: ref };
+}
+
+async function tungguProyekAktif(o, fetchImpl, opt) {
+  var tunggu = (opt && opt.tunggu) || tungguMs;
+  var batas = (opt && opt.batasMs) || 10 * 60 * 1000;
+  var interval = (opt && opt.intervalMs) || 5000;
+  var mulai = Date.now();
+  for (;;) {
+    var r = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref), { token: o.token }, fetchImpl);
+    if (r.ok && r.json) {
+      var st = String(r.json.status || r.json.state || '');
+      if (st === 'ACTIVE_HEALTHY') return { ok: true, status: st };
+      if (/FAIL|ERROR/.test(st)) return { ok: false, jenisGalat: 'server', pesan: 'Proyek gagal dibuat (status: ' + st + ').' };
+    }
+    if (Date.now() - mulai > batas) return { ok: false, jenisGalat: 'timeout', pesan: 'Proyek belum ACTIVE_HEALTHY setelah 10 menit — periksa di dashboard Supabase.' };
+    await tunggu(interval);
+  }
+}
+
+async function jalankanSqlSupabase(o, fetchImpl) {
+  var r = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref) + '/database/query', {
+    method: 'POST', token: o.token, body: { query: o.query }
+  }, fetchImpl);
+  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, pesanServer: pesanDariRes(r) };
+  return { ok: true };
+}
+
+async function hitungTabelSupabase(o, fetchImpl) {
+  var r2 = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref) + '/database/query', {
+    method: 'POST', token: o.token,
+    body: { query: "SELECT count(*) AS jumlah FROM information_schema.tables WHERE table_schema = 'public'" }
+  }, fetchImpl);
+  if (!r2.ok) return { ok: false, status: r2.status, galat: r2.galat, pesanServer: pesanDariRes(r2) };
+  var jumlah = ambilHitungTabel(r2.json);
+  if (jumlah == null) return { ok: false, pesanServer: 'Jawaban hitung tabel tidak bisa dibaca.' };
+  return { ok: true, jumlah: jumlah };
+}
+
+async function ambilKunciSupabase(o, fetchImpl) {
+  var r = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref) + '/api-keys', { token: o.token }, fetchImpl);
+  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, pesanServer: pesanDariRes(r) };
+  var key = pilihPublishableKey(r.json);
+  if (!key) return { ok: false, pesanServer: 'Tidak ada publishable key di jawaban server.' };
+  return { ok: true, key: key };
+}
+
+async function buatRepoGithub(o, fetchImpl) {
+  var r = await panggilJson(API_GITHUB + '/orgs/zhopos/repos', {
+    method: 'POST', token: o.token,
+    body: { name: o.slug, private: false, description: 'ZPOS — ' + o.nama }
+  }, fetchImpl);
+  if (r.ok) return { ok: true };
+  if (r.status === 422) return { ok: false, status: 422, sudahAda: true, pesanServer: pesanDariRes(r) };
+  return { ok: false, status: r.status, galat: r.galat, pesanServer: pesanDariRes(r) };
+}
+
+async function unggahFileGithub(o, fetchImpl) {
+  var url = API_GITHUB + '/repos/zhopos/' + encodeURIComponent(o.slug) + '/contents/' + o.path;
+  var tunggu = o.tunggu || tungguMs;
+  var last = null;
+  for (var coba = 1; coba <= 3; coba++) {
+    var r = await panggilJson(url, {
+      method: 'PUT', token: o.token,
+      body: { message: 'ZPOS ' + VERSI_TERBARU + ': ' + o.path, content: o.kontenB64, branch: 'main' }
+    }, fetchImpl);
+    if (r.ok) return { ok: true };
+    last = r;
+    if (r.status === 404 || r.status === 409) { await tunggu(1000); continue; }
+    break;
+  }
+  return { ok: false, status: last.status, galat: last.galat, pesanServer: pesanDariRes(last) };
+}
+
+async function aktifkanPagesGithub(o, fetchImpl) {
+  var r = await panggilJson(API_GITHUB + '/repos/zhopos/' + encodeURIComponent(o.slug) + '/pages', {
+    method: 'POST', token: o.token,
+    body: { build_type: 'legacy', source: { branch: 'main', path: '/' } }
+  }, fetchImpl);
+  if (r.ok) return { ok: true };
+  if (r.status === 409) return { ok: true, sudahAda: true };
+  return { ok: false, status: r.status, galat: r.galat, pesanServer: pesanDariRes(r) };
+}
+
+async function ambilFileLive(path, jenis, fetchImpl) {
+  try {
+    var res = await fetchImpl(LIVE_ZPOS + path);
+    if (!res.ok) return { ok: false, status: res.status, path: path };
+    if (jenis === 'biner') {
+      var buf = await res.arrayBuffer();
+      return { ok: true, path: path, b64: bufferKeBase64(buf) };
+    }
+    var teks = await res.text();
+    return { ok: true, path: path, b64: teksKeBase64(teks) };
+  } catch (e) {
+    return { ok: false, status: 0, galat: e, path: path };
+  }
+}
+
+// Entri toko hasil wizard — TANPA token apa pun (hanya info koneksi publik).
+function buatTokoWizard(nama, slug, info) {
+  return {
+    id: 'toko-' + slug, nama: nama, slug: slug,
+    link: 'https://zhopos.github.io/' + slug + '/',
+    versi: VERSI_TERBARU, terakhirUpdate: tanggalHariIni(),
+    bos: false, demo: false,
+    ket: 'Toko pembeli — dibuat lewat wizard panel',
+    db: {
+      project: info.namaProyek || info.ref, ref: info.ref,
+      region: 'Singapore (ap-southeast-1)', tabel: info.jumlahTabel,
+      status: 'Healthy', plan: 'Free',
+      url: info.projectUrl, publishableKey: info.publishableKey
+    }
+  };
+}
+
+function hasilGagal(langkah, k) {
+  return { ok: false, langkahGagal: langkah, jenisGalat: k.jenis || 'server', pesan: k.pesan || 'Gagal.' };
+}
+
+// Orkestrator wizard. input: {nama, slug, mode, projectUrl, publishableKey,
+// sbpToken, githubToken, namaProyek, orgSlug, dbPass}.
+// deps: {fetchImpl, tunggu, log(id, status, pesan), simpanToko(toko)}.
+// Berhenti di langkah pertama yang gagal. Token TIDAK PERNAH disimpan.
+async function jalankanWizard(input, deps) {
+  deps = deps || {};
+  var fetchImpl = deps.fetchImpl || (typeof fetch !== 'undefined' ? fetch : null);
+  var tunggu = deps.tunggu || tungguMs;
+  var log = deps.log || function () {};
+  if (!fetchImpl) return { ok: false, langkahGagal: 'validasi', jenisGalat: 'jaringan', pesan: 'fetch tidak tersedia di lingkungan ini.' };
+
+  var nama = String(input.nama || '').trim();
+  var slug = String(input.slug || '').trim();
+
+  // 1. Validasi (tanpa request apa pun).
+  log('validasi', 'jalan', 'Memeriksa isian…');
+  var cek = validasiKoneksi(input.mode, input);
+  if (!cek.ok) {
+    log('validasi', 'gagal', cek.errors.join(' '));
+    return { ok: false, langkahGagal: 'validasi', jenisGalat: 'validasi', pesan: cek.errors.join(' ') };
+  }
+  var ref = cek.ref;
+  var projectUrl = cek.projectUrl;
+  var sbp = input.sbpToken;
+  var gh = input.githubToken;
+  log('validasi', 'ok', 'Isian valid.');
+
+  // Mode baru: buat proyek dulu, lalu tunggu ACTIVE_HEALTHY.
+  if (input.mode === 'baru') {
+    log('buat-proyek', 'jalan', 'Membuat proyek Supabase "' + input.namaProyek + '"…');
+    var buat = await buatProyekSupabase({ nama: input.namaProyek, orgSlug: input.orgSlug, dbPass: input.dbPass, token: sbp }, fetchImpl);
+    if (!buat.ok) {
+      var kb = klasifikasiGalatKoneksi(buat);
+      log('buat-proyek', 'gagal', kb.pesan);
+      return hasilGagal('buat-proyek', kb);
+    }
+    ref = buat.ref;
+    projectUrl = urlDariRef(ref);
+    log('buat-proyek', 'ok', 'Proyek dibuat — ref ' + ref + '. Menunggu ACTIVE_HEALTHY…');
+    var siap = await tungguProyekAktif({ ref: ref, token: sbp }, fetchImpl, { tunggu: tunggu });
+    if (!siap.ok) {
+      log('buat-proyek', 'gagal', siap.pesan);
+      return hasilGagal('buat-proyek', siap);
+    }
+    log('buat-proyek', 'ok', 'Proyek ACTIVE_HEALTHY.');
+  } else {
+    log('buat-proyek', 'info', 'Proyek sudah ada — langkah buat proyek dilewati.');
+  }
+
+  // 2. Tes koneksi — gerbang utama; gagal di sini = berhenti.
+  log('tes-koneksi', 'jalan', 'Menghubungi api.supabase.com…');
+  var tes = await tesKoneksiSupabase({ ref: ref, token: sbp }, fetchImpl);
+  if (!tes.ok) {
+    var kt = klasifikasiGalatKoneksi(tes);
+    log('tes-koneksi', 'gagal', kt.pesan);
+    return hasilGagal('tes-koneksi', kt);
+  }
+  log('tes-koneksi', 'ok', 'Terhubung — proyek "' + (tes.nama || ref) + '" status ' + (tes.status || '?') + '.');
+
+  // 3. Pasang skema — 2 chunk berurutan.
+  var sd;
+  try {
+    sd = skemaData();
+  } catch (e) {
+    log('pasang-skema-1', 'gagal', e.message);
+    return { ok: false, langkahGagal: 'pasang-skema-1', jenisGalat: 'server', pesan: e.message };
+  }
+  log('pasang-skema-1', 'jalan', 'Mengirim skema bagian 1/2 (37 tabel + RLS)…');
+  var s1 = await jalankanSqlSupabase({ ref: ref, token: sbp, query: sd.chunk1 }, fetchImpl);
+  if (!s1.ok) {
+    var k1 = klasifikasiGalatKoneksi(s1);
+    log('pasang-skema-1', 'gagal', k1.pesan + (s1.pesanServer ? ' — ' + s1.pesanServer : ''));
+    return hasilGagal('pasang-skema-1', k1);
+  }
+  log('pasang-skema-1', 'ok', 'Skema bagian 1/2 terkirim.');
+  log('pasang-skema-2', 'jalan', 'Mengirim skema bagian 2/2 (seed + grant)…');
+  var s2 = await jalankanSqlSupabase({ ref: ref, token: sbp, query: sd.chunk2 }, fetchImpl);
+  if (!s2.ok) {
+    var k2 = klasifikasiGalatKoneksi(s2);
+    log('pasang-skema-2', 'gagal', k2.pesan + (s2.pesanServer ? ' — ' + s2.pesanServer : ''));
+    return hasilGagal('pasang-skema-2', k2);
+  }
+  log('pasang-skema-2', 'ok', 'Skema bagian 2/2 terkirim.');
+
+  // 4a. Verifikasi jumlah tabel.
+  log('verifikasi-tabel', 'jalan', 'Menghitung tabel di public…');
+  var hit = await hitungTabelSupabase({ ref: ref, token: sbp }, fetchImpl);
+  if (!hit.ok) {
+    var kh = klasifikasiGalatKoneksi(hit);
+    log('verifikasi-tabel', 'gagal', kh.pesan + (hit.pesanServer ? ' — ' + hit.pesanServer : ''));
+    return hasilGagal('verifikasi-tabel', kh);
+  }
+  if (hit.jumlah < 37) {
+    log('verifikasi-tabel', 'gagal', 'Hanya ' + hit.jumlah + ' tabel (harus ≥ 37) — skema tidak terpasang penuh.');
+    return { ok: false, langkahGagal: 'verifikasi-tabel', jenisGalat: 'server', pesan: 'Hanya ' + hit.jumlah + ' tabel (harus ≥ 37).' };
+  }
+  log('verifikasi-tabel', 'ok', hit.jumlah + ' tabel terverifikasi.');
+  var jumlahTabel = hit.jumlah;
+
+  // 4b. Dua migrasi pasca-instalasi (idempotent — aman diulang).
+  log('migrasi-cabang', 'jalan', 'Migrasi v4-41 (cabang_id pelanggan/pemasok)…');
+  var mc = await jalankanSqlSupabase({ ref: ref, token: sbp, query: sd.migrasiCabangV441 }, fetchImpl);
+  if (!mc.ok) {
+    var kmc = klasifikasiGalatKoneksi(mc);
+    log('migrasi-cabang', 'gagal', kmc.pesan + (mc.pesanServer ? ' — ' + mc.pesanServer : ''));
+    return hasilGagal('migrasi-cabang', kmc);
+  }
+  log('migrasi-cabang', 'ok', 'Migrasi v4-41 selesai.');
+  log('migrasi-desimal', 'jalan', 'Migrasi desimal v4-45 (qty pecahan)…');
+  var md = await jalankanSqlSupabase({ ref: ref, token: sbp, query: sd.migrasiDesimalV445 }, fetchImpl);
+  if (!md.ok) {
+    var kmd = klasifikasiGalatKoneksi(md);
+    log('migrasi-desimal', 'gagal', kmd.pesan + (md.pesanServer ? ' — ' + md.pesanServer : ''));
+    return hasilGagal('migrasi-desimal', kmd);
+  }
+  log('migrasi-desimal', 'ok', 'Migrasi desimal v4-45 selesai.');
+
+  // 5. Ambil kunci (cocokkan dengan yang ditempel Bos).
+  log('ambil-kunci', 'jalan', 'Mengambil publishable key proyek…');
+  var kunci = await ambilKunciSupabase({ ref: ref, token: sbp }, fetchImpl);
+  if (!kunci.ok) {
+    var kk = klasifikasiGalatKoneksi(kunci);
+    log('ambil-kunci', 'gagal', kk.pesan + (kunci.pesanServer ? ' — ' + kunci.pesanServer : ''));
+    return hasilGagal('ambil-kunci', kk);
+  }
+  var keyDipakai = kunci.key;
+  if (input.mode === 'ada' && input.publishableKey && input.publishableKey !== keyDipakai) {
+    log('ambil-kunci', 'info', 'Key dari API dipakai (berbeda dengan yang ditempel).');
+  }
+  log('ambil-kunci', 'ok', 'Publishable key didapat.');
+
+  // 6a. Buat repo GitHub.
+  log('buat-repo', 'jalan', 'Membuat repo zhopos/' + slug + '…');
+  var repo = await buatRepoGithub({ slug: slug, nama: nama, token: gh }, fetchImpl);
+  if (!repo.ok) {
+    if (repo.sudahAda) {
+      log('buat-repo', 'gagal', 'Repo zhopos/' + slug + ' sudah ada — pilih slug lain atau hapus repo itu dulu. Wizard berhenti (tidak menimpa repo).');
+      return { ok: false, langkahGagal: 'buat-repo', jenisGalat: 'sudah-ada', pesan: 'Repo zhopos/' + slug + ' sudah ada.' };
+    }
+    var kr = klasifikasiGalatKoneksi(repo);
+    log('buat-repo', 'gagal', kr.pesan + (repo.pesanServer ? ' — ' + repo.pesanServer : ''));
+    return hasilGagal('buat-repo', kr);
+  }
+  log('buat-repo', 'ok', 'Repo zhopos/' + slug + ' dibuat.');
+
+  // 6b. Salin file aplikasi dari live + config.js hasil wizard.
+  log('salin-file', 'jalan', 'Menyalin file aplikasi ' + VERSI_TERBARU + ' dari live…');
+  var files = daftarFileAplikasi();
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    var ambil = await ambilFileLive(f.path, f.jenis, fetchImpl);
+    if (!ambil.ok) {
+      if (f.wajib) {
+        log('salin-file', 'gagal', 'File live ' + f.path + ' tidak bisa diambil (' + (ambil.status || 'jaringan') + ').');
+        return { ok: false, langkahGagal: 'salin-file', jenisGalat: 'jaringan', pesan: 'File live ' + f.path + ' tidak bisa diambil.' };
+      }
+      log('salin-file', 'info', f.path + ' tidak ditemukan di live — dilewati.');
+      continue;
+    }
+    var up = await unggahFileGithub({ slug: slug, path: f.path, kontenB64: ambil.b64, token: gh, tunggu: tunggu }, fetchImpl);
+    if (!up.ok) {
+      var ku = klasifikasiGalatKoneksi(up);
+      log('salin-file', 'gagal', 'Gagal mengunggah ' + f.path + ': ' + ku.pesan);
+      return hasilGagal('salin-file', ku);
+    }
+  }
+  var cfgToko = buatConfigToko(projectUrl, keyDipakai);
+  var upCfg = await unggahFileGithub({ slug: slug, path: 'config.js', kontenB64: teksKeBase64(cfgToko), token: gh, tunggu: tunggu }, fetchImpl);
+  if (!upCfg.ok) {
+    var kc = klasifikasiGalatKoneksi(upCfg);
+    log('salin-file', 'gagal', 'Gagal mengunggah config.js: ' + kc.pesan);
+    return hasilGagal('salin-file', kc);
+  }
+  log('salin-file', 'ok', 'File aplikasi + config.js terunggah.');
+
+  // 6c. Aktifkan GitHub Pages.
+  log('aktifkan-pages', 'jalan', 'Mengaktifkan GitHub Pages (main, /)…');
+  var pages = await aktifkanPagesGithub({ slug: slug, token: gh }, fetchImpl);
+  if (!pages.ok) {
+    var kp = klasifikasiGalatKoneksi(pages);
+    log('aktifkan-pages', 'gagal', kp.pesan + (pages.pesanServer ? ' — ' + pages.pesanServer : ''));
+    return hasilGagal('aktifkan-pages', kp);
+  }
+  log('aktifkan-pages', 'ok', 'GitHub Pages aktif (situs tampil ~1 menit lagi).');
+
+  // 7. Selesai — simpan toko (TANPA token).
+  var toko = buatTokoWizard(nama, slug, {
+    ref: ref, projectUrl: projectUrl, publishableKey: keyDipakai,
+    jumlahTabel: jumlahTabel, namaProyek: input.namaProyek
+  });
+  if (deps.simpanToko) deps.simpanToko(toko);
+  log('selesai', 'ok', 'Toko tersimpan — ' + toko.link);
+  return { ok: true, toko: toko, link: toko.link, ref: ref, jumlahTabel: jumlahTabel, publishableKey: keyDipakai };
+}
 
 // --- Fungsi murni (dipakai UI + sim) ----------------------------------------
 function versiKeAngka(v) {
@@ -151,7 +698,37 @@ if (typeof module !== 'undefined' && module.exports) {
     gabungRegistry: gabungRegistry,
     buatTokoDemo: buatTokoDemo,
     hitungRingkasan: hitungRingkasan,
-    LS_TOKO_DEMO: LS_TOKO_DEMO
+    LS_TOKO_DEMO: LS_TOKO_DEMO,
+    muatTokoDemo: muatTokoDemo,
+    simpanTokoDemo: simpanTokoDemo,
+    // Wizard v2 — Hubungkan Supabase.
+    LANGKAH_WIZARD: LANGKAH_WIZARD,
+    API_SUPABASE: API_SUPABASE,
+    API_GITHUB: API_GITHUB,
+    LIVE_ZPOS: LIVE_ZPOS,
+    refDariUrl: refDariUrl,
+    urlDariRef: urlDariRef,
+    validasiKoneksi: validasiKoneksi,
+    buatConfigToko: buatConfigToko,
+    klasifikasiGalatKoneksi: klasifikasiGalatKoneksi,
+    pilihPublishableKey: pilihPublishableKey,
+    ambilHitungTabel: ambilHitungTabel,
+    daftarFileAplikasi: daftarFileAplikasi,
+    teksKeBase64: teksKeBase64,
+    bufferKeBase64: bufferKeBase64,
+    tesKoneksiSupabase: tesKoneksiSupabase,
+    buatProyekSupabase: buatProyekSupabase,
+    tungguProyekAktif: tungguProyekAktif,
+    jalankanSqlSupabase: jalankanSqlSupabase,
+    hitungTabelSupabase: hitungTabelSupabase,
+    ambilKunciSupabase: ambilKunciSupabase,
+    buatRepoGithub: buatRepoGithub,
+    unggahFileGithub: unggahFileGithub,
+    aktifkanPagesGithub: aktifkanPagesGithub,
+    ambilFileLive: ambilFileLive,
+    buatTokoWizard: buatTokoWizard,
+    jalankanWizard: jalankanWizard,
+    skemaData: function () { return skemaData(); }
   };
 }
 
@@ -246,6 +823,8 @@ if (typeof document !== 'undefined') {
       + '<div class="row"><span>Jumlah tabel</span><span>' + esc(db.tabel != null ? db.tabel : '—') + ' tabel</span></div>'
       + '<div class="row"><span>Status database</span><span>' + esc(db.status || '—') + '</span></div>'
       + '<div class="row"><span>Paket</span><span>' + esc(db.plan || '—') + '</span></div>'
+      + (db.url ? '<div class="row"><span>URL Supabase</span><span>' + esc(db.url) + '</span></div>' : '')
+      + (db.publishableKey ? '<div class="row"><span>Publishable key</span><span>' + esc(db.publishableKey) + '</span></div>' : '')
       + '<div class="links"><button class="link" id="btnTutupDetail">&lsaquo; Kembali ke daftar</button></div>'
       + '</div>';
     el('detailToko').classList.remove('hidden');
@@ -387,6 +966,7 @@ if (typeof document !== 'undefined') {
   }
 
   async function keluar() {
+    bersihkanTokenSesi();
     try { await client.auth.signOut(); } catch (e) { /* abaikan */ }
     tampilLogin();
   }
@@ -416,22 +996,145 @@ if (typeof document !== 'undefined') {
       if (v !== bersih) el('slugBaru').value = bersih;
     });
 
-    el('btnJalankanBuat').addEventListener('click', async function () {
+    // --- Token sesi wizard: HANYA di memori, tidak pernah disimpan -----------
+    // Dibersihkan saat wizard selesai / batal / keluar. Field password di form
+    // juga ikut dikosongkan.
+    var tokenSesi = { sbp: null, github: null };
+    function bersihkanTokenSesi() {
+      tokenSesi.sbp = null;
+      tokenSesi.github = null;
+      ['hubTokenSbp', 'hubTokenGh', 'hubDbPass'].forEach(function (id) {
+        var f = el(id);
+        if (f) f.value = '';
+      });
+    }
+
+    function modeKoneksi() {
+      var r = document.querySelector('input[name="modeKoneksi"]:checked');
+      return r ? r.value : 'ada';
+    }
+
+    function aturModeKoneksi() {
+      var mode = modeKoneksi();
+      el('grupModeAda').classList.toggle('hidden', mode !== 'ada');
+      el('grupModeBaru').classList.toggle('hidden', mode !== 'baru');
+    }
+
+    function tulisLogWizard(id, status, pesan) {
+      var logEl = el('logBuat');
+      if (!logEl) return;
+      logEl.classList.remove('hidden');
+      var label = '';
+      for (var i = 0; i < LANGKAH_WIZARD.length; i++) {
+        if (LANGKAH_WIZARD[i].id === id) { label = LANGKAH_WIZARD[i].label; break; }
+      }
+      var baris = '';
+      if (status === 'jalan') baris = '… ' + label + ' — ' + pesan;
+      else if (status === 'ok') baris = '✓ ' + label + (pesan ? ' — ' + pesan : '');
+      else if (status === 'gagal') baris = '✗ ' + label + ' — ' + pesan;
+      else baris = '· ' + label + (pesan ? ' — ' + pesan : '');
+      tulisLog(logEl, baris, status === 'ok' ? 'ok' : (status === 'jalan' ? 'jalan' : ''));
+    }
+
+    async function jalankanWizardUI() {
       var nama = el('namaBaru').value.trim();
       var slug = el('slugBaru').value.trim();
       var errEl = el('buatErr');
       errEl.textContent = '';
       if (!nama) { errEl.textContent = 'Nama toko wajib diisi.'; return; }
       var slugAda = daftarToko.map(function (t) { return t.slug; });
+      var cekSlug = validasiSlug(slug, slugAda);
+      if (!cekSlug.ok) { errEl.textContent = cekSlug.alasan; return; }
+      var mode = modeKoneksi();
+      var input = {
+        nama: nama, slug: cekSlug.slug, mode: mode,
+        projectUrl: el('hubUrl') ? el('hubUrl').value.trim() : '',
+        publishableKey: el('hubKey') ? el('hubKey').value.trim() : '',
+        sbpToken: el('hubTokenSbp').value.trim(),
+        githubToken: el('hubTokenGh').value.trim(),
+        namaProyek: el('hubNamaProyek') ? el('hubNamaProyek').value.trim() : '',
+        orgSlug: el('hubOrg') ? el('hubOrg').value.trim() : '',
+        dbPass: el('hubDbPass') ? el('hubDbPass').value : ''
+      };
+      // Token hanya masuk memori sesi; field form dikosongkan begitu dibaca.
+      tokenSesi.sbp = input.sbpToken;
+      tokenSesi.github = input.githubToken;
+      el('logBuat').innerHTML = '';
+      el('logBuat').classList.remove('hidden');
+      el('hasilBuat').classList.add('hidden');
+      el('btnJalankanWizard').disabled = true;
+      el('btnBatalWizard').disabled = true;
+      try {
+        var hasil = await jalankanWizard(input, {
+          fetchImpl: (typeof fetch !== 'undefined' ? fetch : null),
+          tunggu: tungguMs,
+          log: tulisLogWizard,
+          simpanToko: function (toko) {
+            var demo = muatTokoDemo();
+            demo.push(toko);
+            simpanTokoDemo(demo);
+            muatDaftar();
+            renderSemua();
+          }
+        });
+        if (hasil.ok) {
+          var hasilEl = el('hasilBuat');
+          hasilEl.innerHTML = '<b>Berhasil — ' + esc(nama) + ' sudah live.</b><br>'
+            + 'Link toko: <a href="' + esc(hasil.link) + '" target="_blank" rel="noopener">' + esc(hasil.link) + '</a><br>'
+            + 'Proyek Supabase: ' + esc(hasil.ref) + ' · ' + esc(String(hasil.jumlahTabel)) + ' tabel · versi ' + esc(VERSI_TERBARU) + '<br>'
+            + 'Toko bisa langsung dibuka dan login admin (buat pengguna Admin di Supabase Auth proyek itu bila belum ada).'
+            + '<br><button class="btn btn-primary" style="margin-top:10px;" onclick="window.open(\'' + esc(hasil.link) + '\', \'_blank\')">Buka Toko &rsaquo;</button>';
+          hasilEl.classList.remove('hidden');
+          el('namaBaru').value = '';
+          el('slugBaru').value = '';
+          toast('Toko "' + nama + '" berhasil dibuat.');
+        } else {
+          errEl.textContent = hasil.pesan;
+          toast('Wizard berhenti: ' + hasil.pesan);
+        }
+      } catch (e) {
+        errEl.textContent = 'Wizard gagal: ' + (e && e.message ? e.message : e);
+      } finally {
+        bersihkanTokenSesi();
+        el('btnJalankanWizard').disabled = false;
+        el('btnBatalWizard').disabled = false;
+      }
+    }
+
+    el('btnJalankanWizard').addEventListener('click', jalankanWizardUI);
+
+    el('btnBatalWizard').addEventListener('click', function () {
+      bersihkanTokenSesi();
+      el('logBuat').innerHTML = '';
+      el('logBuat').classList.add('hidden');
+      el('hasilBuat').classList.add('hidden');
+      el('buatErr').textContent = '';
+      el('areaBuat').classList.add('hidden');
+      toast('Dibatalkan — token sudah dihapus dari memori.');
+    });
+
+    document.querySelectorAll('input[name="modeKoneksi"]').forEach(function (r) {
+      r.addEventListener('change', aturModeKoneksi);
+    });
+    aturModeKoneksi();
+
+    el('linkSimulasi').addEventListener('click', async function (e) {
+      e.preventDefault();
+      var nama = el('namaBaru').value.trim();
+      var slug = el('slugBaru').value.trim();
+      var errEl = el('buatErr');
+      errEl.textContent = '';
+      if (!nama) { errEl.textContent = 'Nama toko wajib diisi (untuk simulasi).'; return; }
+      var slugAda = daftarToko.map(function (t) { return t.slug; });
       var cek = validasiSlug(slug, slugAda);
       if (!cek.ok) { errEl.textContent = cek.alasan; return; }
-      el('btnJalankanBuat').disabled = true;
+      el('btnJalankanWizard').disabled = true;
       try {
         await simulasiProvisioning(nama, cek.slug);
         el('namaBaru').value = '';
         el('slugBaru').value = '';
       } finally {
-        el('btnJalankanBuat').disabled = false;
+        el('btnJalankanWizard').disabled = false;
       }
     });
 
