@@ -556,6 +556,17 @@ function normalisasiSlug(s) {
     .replace(/^-|-$/g, '');
 }
 
+// Normalisasi saat mengetik: sama seperti normalisasiSlug, TAPI strip di ujung
+// TIDAK dihapus — kalau dihapus, tanda - yang baru diketik langsung hilang
+// (selalu di ujung saat mengetik) dan slug "toko-berkah" tidak bisa diketik.
+// Pembersihan ujung hanya dilakukan saat submit (normalisasiSlug).
+function normalisasiSlugLive(s) {
+  return String(s || '').toLowerCase()
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-+/g, '-');
+}
+
 // Validasi slug toko baru. slugAda = daftar slug yang sudah terpakai.
 function validasiSlug(slug, slugAda) {
   var s = String(slug || '').trim();
@@ -632,6 +643,7 @@ if (typeof module !== 'undefined' && module.exports) {
     versiKeAngka: versiKeAngka,
     perluUpdate: perluUpdate,
     normalisasiSlug: normalisasiSlug,
+    normalisasiSlugLive: normalisasiSlugLive,
     validasiSlug: validasiSlug,
     gabungRegistry: gabungRegistry,
     buatTokoDemo: buatTokoDemo,
@@ -928,7 +940,7 @@ if (typeof document !== 'undefined') {
 
     el('slugBaru').addEventListener('input', function () {
       var v = el('slugBaru').value;
-      var bersih = normalisasiSlug(v);
+      var bersih = normalisasiSlugLive(v);
       if (v !== bersih) el('slugBaru').value = bersih;
     });
 
@@ -963,7 +975,7 @@ if (typeof document !== 'undefined') {
 
     async function jalankanWizardUI() {
       var nama = el('namaBaru').value.trim();
-      var slug = el('slugBaru').value.trim();
+      var slug = normalisasiSlug(el('slugBaru').value);
       var errEl = el('buatErr');
       errEl.textContent = '';
       if (!nama) { errEl.textContent = 'Nama toko wajib diisi.'; return; }
@@ -1037,7 +1049,7 @@ if (typeof document !== 'undefined') {
     el('linkSimulasi').addEventListener('click', async function (e) {
       e.preventDefault();
       var nama = el('namaBaru').value.trim();
-      var slug = el('slugBaru').value.trim();
+      var slug = normalisasiSlug(el('slugBaru').value);
       var errEl = el('buatErr');
       errEl.textContent = '';
       if (!nama) { errEl.textContent = 'Nama toko wajib diisi (untuk simulasi).'; return; }
