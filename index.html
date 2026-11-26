@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel Super Admin — ZPOS</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f1f5f4; color: #1f2937; }
+  header { background: #0f766e; color: #fff; padding: 16px; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  header h1 { font-size: 18px; }
+  header p { font-size: 12px; opacity: .85; margin-top: 2px; }
+  header .btn-keluar { background: rgba(255,255,255,.15); color: #fff; border: 1px solid rgba(255,255,255,.4); border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  main { max-width: 720px; margin: 0 auto; padding: 16px 16px 48px; }
+  .hidden { display: none !important; }
+  .stats { display: flex; gap: 8px; margin-bottom: 16px; }
+  .stat { flex: 1; background: #fff; border-radius: 12px; padding: 12px; text-align: center; }
+  .stat b { display: block; font-size: 20px; color: #0f766e; }
+  .stat span { font-size: 11px; color: #6b7280; }
+  .actions { display: flex; gap: 8px; margin-bottom: 16px; }
+  .btn { flex: 1; border: 0; border-radius: 10px; padding: 13px 10px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .btn-primary { background: #0f766e; color: #fff; }
+  .btn-ghost { background: #fff; color: #0f766e; border: 1px solid #0f766e; }
+  .btn[disabled] { opacity: .55; cursor: default; }
+  .section { font-size: 13px; font-weight: 700; color: #374151; margin: 4px 2px 8px; }
+  .card { background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 10px; }
+  .card h2 { font-size: 15px; }
+  .card .sub { font-size: 12px; color: #6b7280; margin-top: 2px; }
+  .row { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: #4b5563; margin-top: 8px; }
+  .row span:last-child { text-align: right; word-break: break-all; }
+  .badge { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; white-space: nowrap; }
+  .ok { background: #dcfce7; color: #166534; }
+  .warn { background: #fef3c7; color: #92400e; }
+  .demo { background: #fef3c7; color: #92400e; }
+  .bos { background: #ccfbf1; color: #0f766e; }
+  .card .links { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .card .links a, .card .links button.link { font-size: 13px; color: #0f766e; font-weight: 600; text-decoration: none; background: none; border: 0; cursor: pointer; padding: 0; font-family: inherit; }
+  .note { background: #fffbeb; border: 1px solid #fde68a; border-radius: 12px; padding: 12px 14px; font-size: 13px; margin-bottom: 16px; }
+  .note b { color: #92400e; }
+  .note p { margin-top: 6px; }
+  .form { background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 16px; }
+  .form label { display: block; font-size: 12px; color: #6b7280; margin: 10px 0 4px; }
+  .form input { width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
+  .form .hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+  .form .err { font-size: 12px; color: #b91c1c; margin-top: 6px; min-height: 16px; }
+  .log { background: #111827; color: #d1fae5; border-radius: 10px; padding: 12px 14px; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; margin-top: 12px; }
+  .log .jalan { color: #fbbf24; }
+  .log .ok { color: #34d399; background: none; padding: 0; }
+  .hasil { background: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 10px; padding: 12px 14px; font-size: 13px; margin-top: 12px; }
+  .hasil b { color: #065f46; }
+  .hasil a { color: #0f766e; font-weight: 600; word-break: break-all; }
+  footer { text-align: center; font-size: 11px; color: #9ca3af; padding: 0 16px 24px; }
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111827; color: #fff; padding: 10px 16px; border-radius: 999px; font-size: 13px; max-width: 92vw; text-align: center; z-index: 50; }
+  .login-card { background: #fff; border-radius: 12px; padding: 20px 16px; margin-top: 24px; }
+  .login-card h2 { font-size: 16px; margin-bottom: 4px; }
+  .login-card p { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
+  .login-card label { display: block; font-size: 12px; color: #6b7280; margin: 10px 0 4px; }
+  .login-card input { width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
+  .login-card .err { font-size: 12px; color: #b91c1c; margin-top: 8px; min-height: 16px; }
+  @media (min-width: 700px) { header h1 { font-size: 20px; } }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Panel Super Admin</h1>
+    <p>ZPOS &middot; zhopos.github.io/super-admin &middot; hanya Bos</p>
+  </div>
+  <button id="btnKeluar" class="btn-keluar hidden">Keluar</button>
+</header>
+<main>
+
+  <!-- LAYAR LOGIN -->
+  <div id="layarLogin" class="login-card">
+    <h2>Masuk Panel</h2>
+    <p>Login Bos saja. Tidak ada pendaftaran akun baru di panel ini.</p>
+    <label>Email</label>
+    <input id="loginEmail" type="email" autocomplete="username">
+    <label>Kata sandi</label>
+    <input id="loginSandi" type="password" autocomplete="current-password" placeholder="Kata sandi admin ZPOS">
+    <div class="err" id="loginErr"></div>
+    <button id="btnMasuk" class="btn btn-primary" style="width:100%; margin-top:6px;">Masuk</button>
+    <p class="hint" style="font-size:11px;color:#9ca3af;margin-top:10px;">Login memakai akun Supabase Auth proyek ZPOS Bos (sama seperti login kasir). Sesi disimpan oleh Supabase di browser ini.</p>
+  </div>
+
+  <!-- LAYAR PANEL -->
+  <div id="layarPanel" class="hidden">
+    <div class="note">
+      <b>Mode Demo &mdash; panel v1 ini simulasi.</b>
+      <p>Provisioning sungguhan (buat proyek Supabase + repo + deploy) belum bisa jalan dari situs statis ini: butuh backend + token Management API, dan akun Supabase tiap pembeli tetap harus dibuat manual oleh Bos (verifikasi email + CAPTCHA). Tombol-tombol di bawah menjalankan <b>simulasi langkah-demi-langkah</b> supaya alurnya bisa dicoba. Toko demo tersimpan di browser ini saja.</p>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b id="statToko">–</b><span>Toko</span></div>
+      <div class="stat"><b id="statVersi">–</b><span>Versi terbaru</span></div>
+      <div class="stat"><b id="statUpdate">–</b><span>Perlu update</span></div>
+    </div>
+
+    <div class="actions">
+      <button id="btnBuatBaru" class="btn btn-primary">+ Buat Toko Baru</button>
+      <button id="btnUpdateSemua" class="btn btn-ghost">Update Semua Toko</button>
+    </div>
+
+    <div id="areaBuat" class="form hidden">
+      <p class="section" style="margin:0">BUAT TOKO BARU</p>
+      <label>Nama toko</label>
+      <input id="namaBaru" placeholder="cth: Toko Berkah">
+      <label>Alamat toko (slug)</label>
+      <input id="slugBaru" placeholder="cth: toko-berkah &rarr; zhopos.github.io/toko-berkah" autocapitalize="off" autocomplete="off" spellcheck="false">
+      <p class="hint">Slug hanya huruf kecil, angka, dan tanda -. Tidak boleh kosong, duplikat, atau memakai 'super-admin' / 'zho-pos'.</p>
+      <div class="err" id="buatErr"></div>
+      <p class="hint" style="margin-top:8px;">Yang jalan otomatis (di versi penuh): buat proyek Supabase &rarr; pasang 37 tabel + RLS + seed &rarr; buat repo &rarr; isi config.js &rarr; deploy &rarr; tampilkan link.</p>
+      <p class="hint">Yang tetap manual: buat akun Supabase pembeli (sekali per pembeli) + buat token Management API-nya &mdash; tidak bisa otomatis karena verifikasi email + CAPTCHA.</p>
+      <button id="btnJalankanBuat" class="btn btn-primary" style="width:100%; margin-top:12px;">Jalankan Simulasi Provisioning</button>
+      <div id="logBuat" class="log hidden"></div>
+      <div id="hasilBuat" class="hasil hidden"></div>
+    </div>
+
+    <div id="areaUpdate" class="form hidden">
+      <p class="section" style="margin:0">UPDATE SEMUA TOKO</p>
+      <p class="hint">Urutan: migrasi database dulu, baru deploy aplikasi &mdash; per toko. Toko yang sudah di versi terbaru dilewati. Toko Bos sendiri sudah dites dulu sebelum disebar (kelinci percobaan).</p>
+      <div id="logUpdate" class="log hidden"></div>
+    </div>
+
+    <p class="section">DAFTAR TOKO</p>
+    <div id="daftarToko"></div>
+
+    <div id="detailToko" class="hidden"></div>
+  </div>
+
+</main>
+<footer>Panel Super Admin v1 (Mode Demo) &middot; warna teal #0f766e &middot; ZPOS &middot; 26 Nov 2026</footer>
+<div id="toast" class="hidden"></div>
+</body>
+</html>
