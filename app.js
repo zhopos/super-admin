@@ -61,8 +61,12 @@ var LANGKAH_UPDATE = [
 // hidup di memori selama wizard jalan — TIDAK PERNAH ditulis ke localStorage,
 // file, atau repo; dibersihkan saat selesai / batal / keluar. Log wizard
 // tidak pernah menampilkan isi token.
+// Panggilan Management API Supabase TIDAK LANGSUNG ke api.supabase.com
+// (browser diblokir CORS — terbukti live 23:23 WIB) — semuanya lewat relay
+// Edge Function "relay-supabase" di proyek zho-pos sendiri (RELAY_URL).
+// Panggilan GitHub (api.github.com) TETAP langsung — CORS-nya diizinkan.
 // ----------------------------------------------------------------------------
-var API_SUPABASE = 'https://api.supabase.com/v1';
+var RELAY_URL = 'https://jcbisimrlhcdajrfvdju.supabase.co/functions/v1/relay-supabase';
 var API_GITHUB = 'https://api.github.com';
 var LIVE_ZPOS = 'https://zhopos.github.io/';
 
@@ -165,8 +169,21 @@ function pesanDariRes(r) {
 }
 
 // Bedakan penyebab gagal koneksi — supaya pesan ke Bos tepat sasaran.
+// Galat dari RELAY (x.relayError) dicek DULU: status di sini milik relay
+// sendiri (bukan status upstream) — mis. 401 dari platform karena kunci
+// anon tidak diterima, 502 karena relay tidak bisa mencapai Supabase.
+// Status upstream (401 token sbp_ salah, 404, 403, 429, 5xx) diteruskan
+// relay apa adanya dan ditangani di bawah seperti biasa.
 function klasifikasiGalatKoneksi(x) {
   var status = (x && x.status) || 0;
+  if (x && x.relayError) {
+    if (status === 0) return { jenis: 'relay', pesan: 'Relay Supabase tidak bisa dihubungi — periksa internet, pastikan function relay-supabase sudah di-deploy di proyek zho-pos, lalu coba lagi.' };
+    if (status === 401) return { jenis: 'relay', pesan: 'Relay menolak panggilan (401 Invalid JWT) — kunci anon panel tidak diterima. Di dashboard Supabase, matikan "Verify JWT" untuk function relay-supabase, lalu coba lagi.' };
+    if (status === 400) return { jenis: 'relay', pesan: 'Relay menolak permintaan (400) — ' + ((x && x.pesanServer) || 'isian tidak valid.') };
+    if (status === 403) return { jenis: 'relay', pesan: 'Relay menolak akses (403) — panel hanya diizinkan dari https://zhopos.github.io.' };
+    if (status === 502) return { jenis: 'relay', pesan: 'Relay tidak bisa menghubungi api.supabase.com (502) — coba lagi nanti.' };
+    return { jenis: 'relay', pesan: 'Relay Supabase bermasalah (' + status + ') — coba lagi nanti.' };
+  }
   if (status === 401) return { jenis: 'token', pesan: 'Token Management API ditolak (401) — token salah atau kedaluwarsa. Periksa token sbp_ yang ditempel.' };
   if (status === 404) return { jenis: 'tidak-ditemukan', pesan: 'Proyek tidak ditemukan (404) — periksa Project URL / ref, dan pastikan token berasal dari akun Supabase yang sama dengan proyek itu.' };
   if (status === 403) return { jenis: 'token', pesan: 'Token tidak punya akses ke proyek ini (403) — token harus dibuat di akun Supabase yang sama dengan proyek toko.' };
@@ -175,7 +192,7 @@ function klasifikasiGalatKoneksi(x) {
   if (status === 0 || (x && x.galat)) {
     var m = String((x && x.galat && x.galat.message) || (x && x.message) || '');
     if (/abort/i.test(m)) return { jenis: 'timeout', pesan: 'Permintaan kehabisan waktu (timeout) — periksa koneksi lalu coba lagi.' };
-    return { jenis: 'cors', pesan: 'Browser tidak bisa menghubungi api.supabase.com — kemungkinan diblokir CORS atau tidak ada internet. Periksa koneksi internet, lalu coba lagi. Bila tetap gagal, hubungkan lewat skrip di mesin Bob.' };
+    return { jenis: 'jaringan', pesan: 'Tidak bisa menghubungi server — periksa koneksi internet lalu coba lagi.' };
   }
   var ps = (x && x.pesanServer) || '';
   return { jenis: 'server', pesan: 'Gagal menghubungi Supabase' + (status ? ' (' + status + ')' : '') + (ps ? ': ' + ps : '.') };
@@ -258,35 +275,71 @@ async function panggilJson(url, opt, fetchImpl) {
   }
 }
 
+// Panggilan Management API Supabase LEWAT RELAY (bukan langsung — browser
+// diblokir CORS oleh api.supabase.com). o: {token (sbp_), anonKey,
+// method ('GET'/'POST'), path ('/v1/projects/{ref}...'), body}.
+// Relay menjawab SELALU HTTP 200 + amplop {status, body} untuk panggilan
+// yang diteruskan (status upstream apa adanya); penolakan relay sendiri
+// (400 validasi / 403 origin / 502 upstream tidak terjangkau) datang
+// sebagai HTTP non-ok dan ditandai relayError: true.
+// Header `apikey` (BUKAN Authorization Bearer): kunci publishable baru
+// (sb_publishable_...) bukan JWT — Bearer ditolak platform "Invalid JWT".
+// fetchImpl disuntik supaya sim bisa memakai mock.
+async function panggilRelaySupabase(o, fetchImpl) {
+  var res;
+  try {
+    res = await fetchImpl(RELAY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': o.anonKey || '' },
+      body: JSON.stringify({ token: o.token, method: o.method, path: o.path, body: o.body != null ? o.body : null })
+    });
+  } catch (e) {
+    return { ok: false, status: 0, galat: e, relayError: true, json: null, text: '' };
+  }
+  var text = '';
+  try { text = await res.text(); } catch (e) { text = ''; }
+  var env = null;
+  try { env = text ? JSON.parse(text) : null; } catch (e) { env = null; }
+  if (!res.ok) {
+    var msg = (env && typeof env.message === 'string') ? env.message : '';
+    return { ok: false, status: res.status, relayError: true, pesanServer: msg, json: env, text: text };
+  }
+  if (!env || typeof env.status !== 'number') {
+    return { ok: false, status: 0, relayError: true, pesanServer: 'Jawaban relay tidak bisa dibaca.', json: null, text: text };
+  }
+  var b = env.body;
+  return {
+    ok: env.status >= 200 && env.status < 300,
+    status: env.status,
+    json: (b && typeof b === 'object') ? b : null,
+    text: (typeof b === 'string') ? b : ''
+  };
+}
+
 async function tesKoneksiSupabase(o, fetchImpl) {
-  var r = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref), { token: o.token }, fetchImpl);
-  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, pesanServer: pesanDariRes(r) };
+  var r = await panggilRelaySupabase({ token: o.token, anonKey: o.anonKey, method: 'GET', path: '/v1/projects/' + encodeURIComponent(o.ref), body: null }, fetchImpl);
+  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, relayError: r.relayError, pesanServer: pesanDariRes(r) };
   var j = r.json || {};
   return { ok: true, status: j.status || j.state, nama: j.name, ref: j.ref || j.id };
 }
 
 async function jalankanSqlSupabase(o, fetchImpl) {
-  var r = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref) + '/database/query', {
-    method: 'POST', token: o.token, body: { query: o.query }
-  }, fetchImpl);
-  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, pesanServer: pesanDariRes(r) };
+  var r = await panggilRelaySupabase({ token: o.token, anonKey: o.anonKey, method: 'POST', path: '/v1/projects/' + encodeURIComponent(o.ref) + '/database/query', body: { query: o.query } }, fetchImpl);
+  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, relayError: r.relayError, pesanServer: pesanDariRes(r) };
   return { ok: true };
 }
 
 async function hitungTabelSupabase(o, fetchImpl) {
-  var r2 = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref) + '/database/query', {
-    method: 'POST', token: o.token,
-    body: { query: "SELECT count(*) AS jumlah FROM information_schema.tables WHERE table_schema = 'public'" }
-  }, fetchImpl);
-  if (!r2.ok) return { ok: false, status: r2.status, galat: r2.galat, pesanServer: pesanDariRes(r2) };
+  var r2 = await panggilRelaySupabase({ token: o.token, anonKey: o.anonKey, method: 'POST', path: '/v1/projects/' + encodeURIComponent(o.ref) + '/database/query', body: { query: "SELECT count(*) AS jumlah FROM information_schema.tables WHERE table_schema = 'public'" } }, fetchImpl);
+  if (!r2.ok) return { ok: false, status: r2.status, galat: r2.galat, relayError: r2.relayError, pesanServer: pesanDariRes(r2) };
   var jumlah = ambilHitungTabel(r2.json);
   if (jumlah == null) return { ok: false, pesanServer: 'Jawaban hitung tabel tidak bisa dibaca.' };
   return { ok: true, jumlah: jumlah };
 }
 
 async function ambilKunciSupabase(o, fetchImpl) {
-  var r = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref) + '/api-keys', { token: o.token }, fetchImpl);
-  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, pesanServer: pesanDariRes(r) };
+  var r = await panggilRelaySupabase({ token: o.token, anonKey: o.anonKey, method: 'GET', path: '/v1/projects/' + encodeURIComponent(o.ref) + '/api-keys', body: null }, fetchImpl);
+  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, relayError: r.relayError, pesanServer: pesanDariRes(r) };
   var key = pilihPublishableKey(r.json);
   if (!key) return { ok: false, pesanServer: 'Tidak ada publishable key di jawaban server.' };
   return { ok: true, key: key };
@@ -366,7 +419,10 @@ function hasilGagal(langkah, k) {
 }
 
 // Orkestrator wizard. Satu mode saja: proyek sudah dibuat.
-// input: {nama, slug, projectUrl, publishableKey, sbpToken, githubToken}.
+// input: {nama, slug, projectUrl, publishableKey, sbpToken, githubToken, anonKey}.
+// anonKey = publishable key proyek zho-pos (dari PANEL_CONFIG) — dikirim
+// panel di header `apikey` saat memanggil relay (bukan Bearer: kunci
+// publishable baru bukan JWT).
 // deps: {fetchImpl, tunggu, log(id, status, pesan), simpanToko(toko)}.
 // Berhenti di langkah pertama yang gagal. Token TIDAK PERNAH disimpan.
 async function jalankanWizard(input, deps) {
@@ -393,8 +449,8 @@ async function jalankanWizard(input, deps) {
   log('validasi', 'ok', 'Isian valid.');
 
   // 2. Tes koneksi — gerbang utama; gagal di sini = berhenti.
-  log('tes-koneksi', 'jalan', 'Menghubungi api.supabase.com…');
-  var tes = await tesKoneksiSupabase({ ref: ref, token: sbp }, fetchImpl);
+  log('tes-koneksi', 'jalan', 'Menghubungi Supabase lewat relay…');
+  var tes = await tesKoneksiSupabase({ ref: ref, token: sbp, anonKey: input.anonKey }, fetchImpl);
   if (!tes.ok) {
     var kt = klasifikasiGalatKoneksi(tes);
     log('tes-koneksi', 'gagal', kt.pesan);
@@ -411,7 +467,7 @@ async function jalankanWizard(input, deps) {
     return { ok: false, langkahGagal: 'pasang-skema-1', jenisGalat: 'server', pesan: e.message };
   }
   log('pasang-skema-1', 'jalan', 'Mengirim skema bagian 1/2 (37 tabel + RLS)…');
-  var s1 = await jalankanSqlSupabase({ ref: ref, token: sbp, query: sd.chunk1 }, fetchImpl);
+  var s1 = await jalankanSqlSupabase({ ref: ref, token: sbp, anonKey: input.anonKey, query: sd.chunk1 }, fetchImpl);
   if (!s1.ok) {
     var k1 = klasifikasiGalatKoneksi(s1);
     log('pasang-skema-1', 'gagal', k1.pesan + (s1.pesanServer ? ' — ' + s1.pesanServer : ''));
@@ -419,7 +475,7 @@ async function jalankanWizard(input, deps) {
   }
   log('pasang-skema-1', 'ok', 'Skema bagian 1/2 terkirim.');
   log('pasang-skema-2', 'jalan', 'Mengirim skema bagian 2/2 (seed + grant)…');
-  var s2 = await jalankanSqlSupabase({ ref: ref, token: sbp, query: sd.chunk2 }, fetchImpl);
+  var s2 = await jalankanSqlSupabase({ ref: ref, token: sbp, anonKey: input.anonKey, query: sd.chunk2 }, fetchImpl);
   if (!s2.ok) {
     var k2 = klasifikasiGalatKoneksi(s2);
     log('pasang-skema-2', 'gagal', k2.pesan + (s2.pesanServer ? ' — ' + s2.pesanServer : ''));
@@ -429,7 +485,7 @@ async function jalankanWizard(input, deps) {
 
   // 4a. Verifikasi jumlah tabel.
   log('verifikasi-tabel', 'jalan', 'Menghitung tabel di public…');
-  var hit = await hitungTabelSupabase({ ref: ref, token: sbp }, fetchImpl);
+  var hit = await hitungTabelSupabase({ ref: ref, token: sbp, anonKey: input.anonKey }, fetchImpl);
   if (!hit.ok) {
     var kh = klasifikasiGalatKoneksi(hit);
     log('verifikasi-tabel', 'gagal', kh.pesan + (hit.pesanServer ? ' — ' + hit.pesanServer : ''));
@@ -444,7 +500,7 @@ async function jalankanWizard(input, deps) {
 
   // 4b. Dua migrasi pasca-instalasi (idempotent — aman diulang).
   log('migrasi-cabang', 'jalan', 'Migrasi v4-41 (cabang_id pelanggan/pemasok)…');
-  var mc = await jalankanSqlSupabase({ ref: ref, token: sbp, query: sd.migrasiCabangV441 }, fetchImpl);
+  var mc = await jalankanSqlSupabase({ ref: ref, token: sbp, anonKey: input.anonKey, query: sd.migrasiCabangV441 }, fetchImpl);
   if (!mc.ok) {
     var kmc = klasifikasiGalatKoneksi(mc);
     log('migrasi-cabang', 'gagal', kmc.pesan + (mc.pesanServer ? ' — ' + mc.pesanServer : ''));
@@ -452,7 +508,7 @@ async function jalankanWizard(input, deps) {
   }
   log('migrasi-cabang', 'ok', 'Migrasi v4-41 selesai.');
   log('migrasi-desimal', 'jalan', 'Migrasi desimal v4-45 (qty pecahan)…');
-  var md = await jalankanSqlSupabase({ ref: ref, token: sbp, query: sd.migrasiDesimalV445 }, fetchImpl);
+  var md = await jalankanSqlSupabase({ ref: ref, token: sbp, anonKey: input.anonKey, query: sd.migrasiDesimalV445 }, fetchImpl);
   if (!md.ok) {
     var kmd = klasifikasiGalatKoneksi(md);
     log('migrasi-desimal', 'gagal', kmd.pesan + (md.pesanServer ? ' — ' + md.pesanServer : ''));
@@ -462,7 +518,7 @@ async function jalankanWizard(input, deps) {
 
   // 5. Ambil kunci (cocokkan dengan yang ditempel Bos).
   log('ambil-kunci', 'jalan', 'Mengambil publishable key proyek…');
-  var kunci = await ambilKunciSupabase({ ref: ref, token: sbp }, fetchImpl);
+  var kunci = await ambilKunciSupabase({ ref: ref, token: sbp, anonKey: input.anonKey }, fetchImpl);
   if (!kunci.ok) {
     var kk = klasifikasiGalatKoneksi(kunci);
     log('ambil-kunci', 'gagal', kk.pesan + (kunci.pesanServer ? ' — ' + kunci.pesanServer : ''));
@@ -651,9 +707,9 @@ if (typeof module !== 'undefined' && module.exports) {
     LS_TOKO_DEMO: LS_TOKO_DEMO,
     muatTokoDemo: muatTokoDemo,
     simpanTokoDemo: simpanTokoDemo,
-    // Wizard v2 — Hubungkan Supabase.
+    // Wizard v2 — Hubungkan Supabase (lewat relay).
     LANGKAH_WIZARD: LANGKAH_WIZARD,
-    API_SUPABASE: API_SUPABASE,
+    RELAY_URL: RELAY_URL,
     API_GITHUB: API_GITHUB,
     LIVE_ZPOS: LIVE_ZPOS,
     refDariUrl: refDariUrl,
@@ -666,6 +722,7 @@ if (typeof module !== 'undefined' && module.exports) {
     daftarFileAplikasi: daftarFileAplikasi,
     teksKeBase64: teksKeBase64,
     bufferKeBase64: bufferKeBase64,
+    panggilRelaySupabase: panggilRelaySupabase,
     tesKoneksiSupabase: tesKoneksiSupabase,
     jalankanSqlSupabase: jalankanSqlSupabase,
     hitungTabelSupabase: hitungTabelSupabase,
@@ -987,7 +1044,8 @@ if (typeof document !== 'undefined') {
         projectUrl: el('hubUrl') ? el('hubUrl').value.trim() : '',
         publishableKey: el('hubKey') ? el('hubKey').value.trim() : '',
         sbpToken: el('hubTokenSbp').value.trim(),
-        githubToken: el('hubTokenGh').value.trim()
+        githubToken: el('hubTokenGh').value.trim(),
+        anonKey: (typeof PANEL_CONFIG !== 'undefined' && PANEL_CONFIG.SUPABASE_ANON_KEY) || ''
       };
       // Token hanya masuk memori sesi; field form dikosongkan begitu dibaca.
       tokenSesi.sbp = input.sbpToken;
