@@ -43,6 +43,14 @@
   .form input { width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
   .form .hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
   .form .err { font-size: 12px; color: #b91c1c; margin-top: 6px; min-height: 16px; }
+  .subcard { border: 1px solid #d1d5db; border-radius: 10px; padding: 12px; margin-top: 14px; }
+  .subcard .section { margin: 0 0 4px; }
+  .check-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #4b5563; margin-top: 8px; }
+  .card label { display: block; font-size: 12px; color: #6b7280; margin: 10px 0 4px; }
+  .card input { width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
+  .card .hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+  .card .err { font-size: 12px; color: #b91c1c; margin-top: 6px; min-height: 16px; }
+  .ok-msg { font-size: 12px; color: #065f46; background: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
   .token-warn { background: #fef3c7; border: 1px solid #f59e0b; border-radius: 10px; padding: 10px 12px; font-size: 12px; margin-top: 10px; line-height: 1.5; }
   .log { background: #111827; color: #d1fae5; border-radius: 10px; padding: 12px 14px; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; margin-top: 12px; }
   .log .jalan { color: #fbbf24; }
@@ -92,7 +100,7 @@
   <div id="layarPanel" class="hidden">
     <div class="note">
       <b>Wizard "Hubungkan Supabase" sudah nyata &mdash; "Update Semua Toko" masih simulasi.</b>
-      <p>Buat Toko Baru di bawah ini benar-benar memanggil API Supabase + GitHub dari browser Bos dengan token yang ditempel Bos sendiri: pakai proyek Supabase yang sudah dibuat &rarr; pasang 37 tabel + migrasi &rarr; buat repo &rarr; isi config.js &rarr; deploy. Token hanya hidup di memori browser selama wizard jalan dan dihapus begitu selesai / batal / keluar &mdash; tidak pernah disimpan. Yang tetap manual: buat akun Supabase pembeli (sekali per pembeli, proyek langsung dibuat di situ) + buat token Management API-nya.</p>
+      <p>Buat Toko Baru di bawah ini benar-benar memanggil API Supabase + GitHub dari browser Bos dengan token yang ditempel Bos sendiri: pakai proyek Supabase yang sudah dibuat &rarr; pasang 37 tabel + migrasi &rarr; buat pengguna Admin toko &rarr; buat repo &rarr; isi config.js &rarr; deploy. Token hanya hidup di memori browser selama wizard jalan dan dihapus begitu selesai / batal / keluar &mdash; tidak pernah disimpan. Yang tetap manual: buat akun Supabase pembeli (sekali per pembeli, proyek langsung dibuat di situ) + buat token Management API-nya.</p>
       <p>Tombol "Update Semua Toko" masih simulasi sampai backend ada.</p>
     </div>
 
@@ -130,6 +138,19 @@
       <label>Token GitHub (ghp_… / github_pat_…)</label>
       <input id="hubTokenGh" type="password" placeholder="ghp_… atau github_pat_…" autocomplete="off" spellcheck="false">
       <p class="hint">GitHub &rarr; Settings &rarr; Developer settings &rarr; Personal access tokens &rarr; Tokens (classic) &rarr; Generate new token, scope <b>repo</b>, beri nama mis. "panel-super-admin", lalu salin. Dipakai wizard untuk membuat repo toko + deploy.</p>
+
+      <div class="subcard">
+        <p class="section">PENGGUNA ADMIN TOKO</p>
+        <p class="hint">Pengguna ini yang dipakai untuk login ke aplikasi toko baru. Dibuat otomatis oleh wizard lewat relay — kata sandi tidak pernah disimpan di mana pun.</p>
+        <label>Email admin</label>
+        <input id="hubAdminEmail" type="email" value="admin@zpos.local" placeholder="cth: admin@tokorafi.local" autocomplete="off" spellcheck="false">
+        <p class="hint">Boleh diubah, mis. admin@tokorafi.local — email ini harus sama dengan email baris pengguna Admin di database (wizard yang menyesuaikannya).</p>
+        <label>Kata sandi admin</label>
+        <input id="hubAdminSandi" type="password" placeholder="Minimal 6 karakter" autocomplete="new-password">
+        <label class="check-row"><input id="hubAdminLihatSandi" type="checkbox" style="width:auto;"> Lihat sandi</label>
+        <p class="hint">Sandi tidak bisa dilihat lagi sesudah toko dibuat — catat di tempat aman bila perlu.</p>
+        <div class="err" id="adminErr"></div>
+      </div>
 
       <div class="token-warn"><b>Token hanya di memori browser ini.</b> Token ditempel di atas hanya dipakai selama wizard jalan — tidak disimpan di localStorage, file, atau repo, dan dihapus begitu wizard selesai, dibatalkan, atau Bos keluar. Jangan tempel token di kolom lain / chat.</div>
 

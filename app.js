@@ -90,6 +90,7 @@ var LANGKAH_WIZARD = [
   { id: 'migrasi-cabang', label: 'Migrasi v4-41 (cabang_id pelanggan/pemasok)' },
   { id: 'migrasi-desimal', label: 'Migrasi desimal v4-45 (qty pecahan)' },
   { id: 'ambil-kunci', label: 'Ambil publishable key proyek' },
+  { id: 'buat-admin', label: 'Buat pengguna Admin toko' },
   { id: 'buat-repo', label: 'Buat repo GitHub zhopos/<slug>' },
   { id: 'salin-file', label: 'Salin file aplikasi v4-45 + config.js' },
   { id: 'aktifkan-pages', label: 'Aktifkan GitHub Pages' },
@@ -140,6 +141,27 @@ function validasiKoneksi(f) {
   if (!/^(ghp_|github_pat_|gho_)/.test(f.githubToken || '')) errors.push('Token GitHub tidak valid — harus token classic (ghp_…) atau fine-grained (github_pat_…) dengan scope repo.');
   if (errors.length) return { ok: false, errors: errors };
   return { ok: true, errors: [], ref: ref, projectUrl: urlDariRef(ref) };
+}
+
+// Validasi format email — dipakai wizard + detail toko.
+function validasiEmail(email) {
+  var e = String(email || '').trim();
+  if (!e) return { ok: false, alasan: 'Email admin wajib diisi.' };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return { ok: false, alasan: 'Email admin tidak valid — contoh: admin@tokorafi.local.' };
+  return { ok: true, email: e.toLowerCase() };
+}
+
+// Validasi isian pengguna Admin. wajibSandi = true di wizard (pengguna baru
+// wajib punya sandi); false di detail toko (sandi boleh kosong = tidak diganti).
+function validasiAdmin(email, password, wajibSandi) {
+  var errors = [];
+  var ce = validasiEmail(email);
+  if (!ce.ok) errors.push(ce.alasan);
+  var pw = String(password == null ? '' : password);
+  if (wajibSandi && pw.length < 6) errors.push('Kata sandi admin minimal 6 karakter.');
+  if (!wajibSandi && pw.length > 0 && pw.length < 6) errors.push('Kata sandi baru minimal 6 karakter.');
+  if (errors.length) return { ok: false, errors: errors };
+  return { ok: true, errors: [], email: ce.email };
 }
 
 // config.js toko baru — format SAMA PERSIS dengan config.js ZPOS (const).
@@ -316,6 +338,47 @@ async function panggilRelaySupabase(o, fetchImpl) {
   };
 }
 
+// Panggilan OPERASI ke relay (bukan penerusan mentah): relay menjalankan
+// operasi itu server-side dan menjawab langsung {ok, sudahAda, diperbarui,
+// pesan}. o: {op, token (sbp_), anonKey, ref, email, password, emailLama,
+// mode}. Jawaban TIDAK PERNAH berisi kunci rahasia / token / sandi —
+// relay tidak mengembalikannya, dan panel tidak pernah menyimpannya.
+async function panggilOpRelay(o, fetchImpl) {
+  var res;
+  try {
+    res = await fetchImpl(RELAY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': o.anonKey || '' },
+      body: JSON.stringify({ op: o.op, token: o.token, ref: o.ref, email: o.email || '', password: o.password || '', emailLama: o.emailLama || '', mode: o.mode || 'buat' })
+    });
+  } catch (e) {
+    return { ok: false, status: 0, galat: e, relayError: true, pesan: 'Relay Supabase tidak bisa dihubungi — periksa internet, pastikan function relay-supabase sudah di-deploy di proyek zho-pos, lalu coba lagi.' };
+  }
+  var text = '';
+  try { text = await res.text(); } catch (e) { text = ''; }
+  var env = null;
+  try { env = text ? JSON.parse(text) : null; } catch (e) { env = null; }
+  if (!res.ok) {
+    var msg = (env && typeof env.message === 'string') ? env.message : '';
+    return { ok: false, status: res.status, relayError: true, pesanServer: msg, pesan: msg || ('Relay menolak permintaan (' + res.status + ').') };
+  }
+  if (!env || typeof env.ok !== 'boolean') {
+    return { ok: false, status: 0, relayError: true, pesan: 'Jawaban relay tidak bisa dibaca.' };
+  }
+  return { ok: env.ok, sudahAda: !!env.sudahAda, diperbarui: !!env.diperbarui, pesan: env.pesan || '', status: res.status };
+}
+
+// Buat ATAU perbarui pengguna Admin sebuah toko lewat relay.
+// mode 'buat' (wizard): pengguna sudah ada → {ok:false, sudahAda:true}.
+// mode 'simpan' (detail toko): pengguna sudah ada → diperbarui.
+// o: {token, anonKey, ref, email, password, emailLama, mode}.
+async function simpanPenggunaAdmin(o, fetchImpl) {
+  return panggilOpRelay({
+    op: 'simpan-pengguna-admin', token: o.token, anonKey: o.anonKey, ref: o.ref,
+    email: o.email, password: o.password, emailLama: o.emailLama, mode: o.mode || 'buat'
+  }, fetchImpl);
+}
+
 async function tesKoneksiSupabase(o, fetchImpl) {
   var r = await panggilRelaySupabase({ token: o.token, anonKey: o.anonKey, method: 'GET', path: '/v1/projects/' + encodeURIComponent(o.ref), body: null }, fetchImpl);
   if (!r.ok) return { ok: false, status: r.status, galat: r.galat, relayError: r.relayError, pesanServer: pesanDariRes(r) };
@@ -409,7 +472,8 @@ function buatTokoWizard(nama, slug, info) {
       project: info.namaProyek || info.ref, ref: info.ref,
       region: 'Singapore (ap-southeast-1)', tabel: info.jumlahTabel,
       status: 'Healthy', plan: 'Free',
-      url: info.projectUrl, publishableKey: info.publishableKey
+      url: info.projectUrl, publishableKey: info.publishableKey,
+      adminEmail: info.adminEmail || ''
     }
   };
 }
@@ -442,6 +506,12 @@ async function jalankanWizard(input, deps) {
     log('validasi', 'gagal', cek.errors.join(' '));
     return { ok: false, langkahGagal: 'validasi', jenisGalat: 'validasi', pesan: cek.errors.join(' ') };
   }
+  var ca = validasiAdmin(input.adminEmail, input.adminPassword, true);
+  if (!ca.ok) {
+    log('validasi', 'gagal', ca.errors.join(' '));
+    return { ok: false, langkahGagal: 'validasi', jenisGalat: 'validasi', pesan: ca.errors.join(' ') };
+  }
+  var adminEmail = ca.email;
   var ref = cek.ref;
   var projectUrl = cek.projectUrl;
   var sbp = input.sbpToken;
@@ -530,6 +600,25 @@ async function jalankanWizard(input, deps) {
   }
   log('ambil-kunci', 'ok', 'Publishable key didapat.');
 
+  // 5b. Buat pengguna Admin — TIDAK PERNAH menggagalkan toko. Bila gagal
+  // atau pengguna sudah ada, wizard lanjut dan layar selesai menampilkan
+  // peringatan; toko bisa diperbaiki dari detail toko (edit pengguna Admin).
+  var adminHasil = { dibuat: false, sudahAda: false, peringatan: '' };
+  log('buat-admin', 'jalan', 'Membuat pengguna Admin (' + adminEmail + ')…');
+  var adm = await simpanPenggunaAdmin({ token: sbp, anonKey: input.anonKey, ref: ref, email: adminEmail, password: input.adminPassword, emailLama: '', mode: 'buat' }, fetchImpl);
+  if (adm.ok) {
+    adminHasil.dibuat = true;
+    log('buat-admin', 'ok', 'Pengguna Admin dibuat — login: ' + adminEmail + '.');
+  } else if (adm.sudahAda) {
+    adminHasil.sudahAda = true;
+    adminHasil.peringatan = 'Pengguna Admin sudah ada — login dengan email/sandi yang sudah ada.';
+    log('buat-admin', 'info', adminHasil.peringatan);
+  } else {
+    var alasanAdm = adm.relayError ? klasifikasiGalatKoneksi(adm).pesan : (adm.pesan || 'gagal');
+    adminHasil.peringatan = 'Pengguna Admin BELUM dibuat — buat dari detail toko. (' + alasanAdm + ')';
+    log('buat-admin', 'info', adminHasil.peringatan);
+  }
+
   // 6a. Buat repo GitHub.
   log('buat-repo', 'jalan', 'Membuat repo zhopos/' + slug + '…');
   var repo = await buatRepoGithub({ slug: slug, nama: nama, token: gh }, fetchImpl);
@@ -584,14 +673,14 @@ async function jalankanWizard(input, deps) {
   }
   log('aktifkan-pages', 'ok', 'GitHub Pages aktif (situs tampil ~1 menit lagi).');
 
-  // 7. Selesai — simpan toko (TANPA token).
+  // 7. Selesai — simpan toko (TANPA token, TANPA sandi).
   var toko = buatTokoWizard(nama, slug, {
     ref: ref, projectUrl: projectUrl, publishableKey: keyDipakai,
-    jumlahTabel: jumlahTabel, namaProyek: tes.nama
+    jumlahTabel: jumlahTabel, namaProyek: tes.nama, adminEmail: adminEmail
   });
   if (deps.simpanToko) deps.simpanToko(toko);
   log('selesai', 'ok', 'Toko tersimpan — ' + toko.link);
-  return { ok: true, toko: toko, link: toko.link, ref: ref, jumlahTabel: jumlahTabel, publishableKey: keyDipakai };
+  return { ok: true, toko: toko, link: toko.link, ref: ref, jumlahTabel: jumlahTabel, publishableKey: keyDipakai, admin: adminHasil, adminEmail: adminEmail };
 }
 
 // --- Fungsi murni (dipakai UI + sim) ----------------------------------------
@@ -689,6 +778,53 @@ function simpanTokoDemo(arr) {
   } catch (e) { /* abaikan — mode demo tetap jalan tanpa penyimpanan */ }
 }
 
+var LS_ADMIN_EMAIL = 'sa_admin_email_v1';
+
+// Email Admin per toko yang diubah dari detail — untuk toko bawaan (tidak
+// tersimpan di LS_TOKO_DEMO) dan sebagai cadangan. Hanya email (info publik),
+// TIDAK PERNAH sandi atau token.
+function muatEmailAdminOverride() {
+  try {
+    if (typeof localStorage === 'undefined') return {};
+    var raw = localStorage.getItem(LS_ADMIN_EMAIL);
+    var obj = raw ? JSON.parse(raw) : {};
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch (e) { return {}; }
+}
+
+function simpanEmailAdminOverride(slug, email) {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    var map = muatEmailAdminOverride();
+    map[slug] = email;
+    localStorage.setItem(LS_ADMIN_EMAIL, JSON.stringify(map));
+  } catch (e) { /* abaikan */ }
+}
+
+// Perbarui email Admin toko yang tersimpan di registry (toko hasil wizard).
+// Mengembalikan true bila ketemu di array tersimpan.
+function perbaruiAdminEmailTersimpan(slug, email) {
+  var arr = muatTokoDemo();
+  var ketemu = false;
+  arr.forEach(function (t) {
+    if (t && t.slug === slug) {
+      t.db = t.db || {};
+      t.db.adminEmail = email;
+      ketemu = true;
+    }
+  });
+  if (ketemu) simpanTokoDemo(arr);
+  return ketemu;
+}
+
+// Terapkan override email Admin ke daftar toko (murni — untuk sim).
+function terapkanOverrideEmail(daftar, map) {
+  (daftar || []).forEach(function (t) {
+    if (t && map && map[t.slug] && t.db) t.db.adminEmail = map[t.slug];
+  });
+  return daftar;
+}
+
 // --- Ekspor untuk sim Node ---------------------------------------------------
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
@@ -707,6 +843,15 @@ if (typeof module !== 'undefined' && module.exports) {
     LS_TOKO_DEMO: LS_TOKO_DEMO,
     muatTokoDemo: muatTokoDemo,
     simpanTokoDemo: simpanTokoDemo,
+    LS_ADMIN_EMAIL: LS_ADMIN_EMAIL,
+    muatEmailAdminOverride: muatEmailAdminOverride,
+    simpanEmailAdminOverride: simpanEmailAdminOverride,
+    perbaruiAdminEmailTersimpan: perbaruiAdminEmailTersimpan,
+    terapkanOverrideEmail: terapkanOverrideEmail,
+    validasiEmail: validasiEmail,
+    validasiAdmin: validasiAdmin,
+    panggilOpRelay: panggilOpRelay,
+    simpanPenggunaAdmin: simpanPenggunaAdmin,
     // Wizard v2 — Hubungkan Supabase (lewat relay).
     LANGKAH_WIZARD: LANGKAH_WIZARD,
     RELAY_URL: RELAY_URL,
@@ -762,7 +907,7 @@ if (typeof document !== 'undefined') {
   }
 
   function muatDaftar() {
-    daftarToko = gabungRegistry(muatTokoDemo());
+    daftarToko = terapkanOverrideEmail(gabungRegistry(muatTokoDemo()), muatEmailAdminOverride());
   }
 
   function renderStats() {
@@ -831,14 +976,96 @@ if (typeof document !== 'undefined') {
       + (db.url ? '<div class="row"><span>URL Supabase</span><span>' + esc(db.url) + '</span></div>' : '')
       + (db.publishableKey ? '<div class="row"><span>Publishable key</span><span>' + esc(db.publishableKey) + '</span></div>' : '')
       + '<div class="links"><button class="link" id="btnTutupDetail">&lsaquo; Kembali ke daftar</button></div>'
-      + '</div>';
+      + '</div>'
+      + kartuAdminToko(t);
     el('detailToko').classList.remove('hidden');
     el('btnTutupDetail').onclick = function () {
       el('detailToko').classList.add('hidden');
       el('detailToko').innerHTML = '';
       detailId = null;
     };
+    pasangKartuAdmin(t);
     el('detailToko').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // Kartu "Pengguna Admin" di detail toko — buat bila belum ada, perbarui
+  // bila sudah ada (satu tombol). Kata sandi lama TIDAK PERNAH ditampilkan
+  // (Supabase tidak mengembalikannya); token sbp_ ditempel tiap kali simpan
+  // dan hanya hidup selama penyimpanan jalan. Toko demo (tanpa proyek
+  // sungguhan) tidak menampilkan kartu ini.
+  function kartuAdminToko(t) {
+    var db = t.db || {};
+    if (!db.ref || t.demo) return '';
+    var emailSekarang = db.adminEmail || '';
+    return '<div class="card">'
+      + '<h2>Pengguna Admin</h2>'
+      + '<p class="sub">Login ke aplikasi toko ini. Email tampil di sini; kata sandi tidak pernah ditampilkan lagi.</p>'
+      + '<div class="row"><span>Email admin saat ini</span><span id="adminEmailSaatIni">' + esc(emailSekarang || 'Belum dibuat') + '</span></div>'
+      + '<label>Email admin</label>'
+      + '<input id="adminEmailEdit" type="email" value="' + esc(emailSekarang) + '" placeholder="cth: admin@tokorafi.local" autocomplete="off" spellcheck="false">'
+      + '<p class="hint">Email ini harus sama dengan email di baris pengguna Admin (tabel pengguna) — aplikasi menautkan peran Admin lewat email.</p>'
+      + '<label>Kata sandi baru</label>'
+      + '<input id="adminSandiEdit" type="password" placeholder="Kosongkan bila tidak diganti" autocomplete="new-password">'
+      + '<label class="check-row"><input id="adminLihatSandiEdit" type="checkbox" style="width:auto;"> Lihat sandi</label>'
+      + '<label>Management API token toko ini (sbp_…)</label>'
+      + '<input id="adminTokenSbp" type="password" placeholder="sbp_…" autocomplete="off" spellcheck="false">'
+      + '<p class="hint">Token ditempel tiap kali menyimpan — hanya dipakai selama penyimpanan jalan, tidak disimpan. Buat di dashboard Supabase akun toko ini &rarr; Access Tokens.</p>'
+      + '<div class="err" id="adminDetailErr"></div>'
+      + '<div class="ok-msg hidden" id="adminDetailOk"></div>'
+      + '<button id="btnSimpanAdmin" class="btn btn-primary" style="width:100%; margin-top:10px;">Simpan Pengguna Admin</button>'
+      + '</div>';
+  }
+
+  function pasangKartuAdmin(t) {
+    var btnAdmin = el('btnSimpanAdmin');
+    if (!btnAdmin) return;
+    el('adminLihatSandiEdit').addEventListener('change', function (e) {
+      el('adminSandiEdit').type = e.target.checked ? 'text' : 'password';
+    });
+    btnAdmin.addEventListener('click', async function () {
+      var emailBaru = el('adminEmailEdit').value.trim();
+      var sandiBaru = el('adminSandiEdit').value;
+      var tokenSbp = el('adminTokenSbp').value.trim();
+      var errEl = el('adminDetailErr');
+      var okEl = el('adminDetailOk');
+      errEl.textContent = '';
+      okEl.classList.add('hidden');
+      var cv = validasiAdmin(emailBaru, sandiBaru, false);
+      if (!cv.ok) { errEl.textContent = cv.errors.join(' '); return; }
+      if (!/^sbp_/.test(tokenSbp)) { errEl.textContent = 'Tempel token Management API (sbp_…) toko ini.'; return; }
+      var emailLama = (t.db && t.db.adminEmail) || '';
+      if (!sandiBaru && !emailLama) { errEl.textContent = 'Pengguna Admin belum ada — isi kata sandi untuk membuatnya.'; return; }
+      btnAdmin.disabled = true;
+      btnAdmin.textContent = 'Menyimpan…';
+      try {
+        var hasil = await simpanPenggunaAdmin({
+          token: tokenSbp, anonKey: (typeof PANEL_CONFIG !== 'undefined' && PANEL_CONFIG.SUPABASE_ANON_KEY) || '',
+          ref: t.db.ref, email: cv.email, password: sandiBaru,
+          emailLama: emailLama, mode: 'simpan'
+        }, (typeof fetch !== 'undefined' ? fetch : null));
+        if (!hasil.ok) {
+          errEl.textContent = hasil.relayError
+            ? klasifikasiGalatKoneksi(hasil).pesan
+            : (hasil.pesan || 'Gagal menyimpan pengguna Admin.');
+          return;
+        }
+        t.db.adminEmail = cv.email;
+        if (!perbaruiAdminEmailTersimpan(t.slug, cv.email)) simpanEmailAdminOverride(t.slug, cv.email);
+        el('adminEmailSaatIni').textContent = cv.email;
+        el('adminSandiEdit').value = '';
+        el('adminTokenSbp').value = '';
+        okEl.textContent = hasil.diperbarui
+          ? 'Pengguna Admin diperbarui — login: ' + cv.email + '.'
+          : 'Pengguna Admin dibuat — login ke toko dengan email ' + cv.email + ' dan sandi yang baru diisi.';
+        okEl.classList.remove('hidden');
+        toast('Pengguna Admin tersimpan.');
+      } catch (e) {
+        errEl.textContent = 'Gagal menyimpan: ' + (e && e.message ? e.message : e);
+      } finally {
+        btnAdmin.disabled = false;
+        btnAdmin.textContent = 'Simpan Pengguna Admin';
+      }
+    });
   }
 
   function tulisLog(logEl, baris, kelas) {
@@ -1001,14 +1228,18 @@ if (typeof document !== 'undefined') {
       if (v !== bersih) el('slugBaru').value = bersih;
     });
 
-    // --- Token sesi wizard: HANYA di memori, tidak pernah disimpan -----------
+    el('hubAdminLihatSandi').addEventListener('change', function (e) {
+      el('hubAdminSandi').type = e.target.checked ? 'text' : 'password';
+    });
+
+    // --- Token + sandi sesi wizard: HANYA di memori, tidak pernah disimpan ---
     // Dibersihkan saat wizard selesai / batal / keluar. Field password di form
     // juga ikut dikosongkan.
     var tokenSesi = { sbp: null, github: null };
     function bersihkanTokenSesi() {
       tokenSesi.sbp = null;
       tokenSesi.github = null;
-      ['hubTokenSbp', 'hubTokenGh'].forEach(function (id) {
+      ['hubTokenSbp', 'hubTokenGh', 'hubAdminSandi'].forEach(function (id) {
         var f = el(id);
         if (f) f.value = '';
       });
@@ -1039,12 +1270,22 @@ if (typeof document !== 'undefined') {
       var slugAda = daftarToko.map(function (t) { return t.slug; });
       var cekSlug = validasiSlug(slug, slugAda);
       if (!cekSlug.ok) { errEl.textContent = cekSlug.alasan; return; }
+      var adminErrEl = el('adminErr');
+      if (adminErrEl) adminErrEl.textContent = '';
+      var cekAdmin = validasiAdmin(el('hubAdminEmail') ? el('hubAdminEmail').value.trim() : '', el('hubAdminSandi') ? el('hubAdminSandi').value : '', true);
+      if (!cekAdmin.ok) {
+        if (adminErrEl) adminErrEl.textContent = cekAdmin.errors.join(' ');
+        else errEl.textContent = cekAdmin.errors.join(' ');
+        return;
+      }
       var input = {
         nama: nama, slug: cekSlug.slug,
         projectUrl: el('hubUrl') ? el('hubUrl').value.trim() : '',
         publishableKey: el('hubKey') ? el('hubKey').value.trim() : '',
         sbpToken: el('hubTokenSbp').value.trim(),
         githubToken: el('hubTokenGh').value.trim(),
+        adminEmail: cekAdmin.email,
+        adminPassword: el('hubAdminSandi') ? el('hubAdminSandi').value : '',
         anonKey: (typeof PANEL_CONFIG !== 'undefined' && PANEL_CONFIG.SUPABASE_ANON_KEY) || ''
       };
       // Token hanya masuk memori sesi; field form dikosongkan begitu dibaca.
@@ -1070,14 +1311,22 @@ if (typeof document !== 'undefined') {
         });
         if (hasil.ok) {
           var hasilEl = el('hasilBuat');
+          var adminBaris = '';
+          if (hasil.admin && hasil.admin.dibuat) {
+            adminBaris = 'Login admin: ' + esc(hasil.adminEmail || input.adminEmail) + ' (sandi yang Bos isi di wizard).<br>';
+          } else if (hasil.admin && hasil.admin.peringatan) {
+            adminBaris = esc(hasil.admin.peringatan) + '<br>';
+          }
           hasilEl.innerHTML = '<b>Berhasil — ' + esc(nama) + ' sudah live.</b><br>'
             + 'Link toko: <a href="' + esc(hasil.link) + '" target="_blank" rel="noopener">' + esc(hasil.link) + '</a><br>'
             + 'Proyek Supabase: ' + esc(hasil.ref) + ' · ' + esc(String(hasil.jumlahTabel)) + ' tabel · versi ' + esc(VERSI_TERBARU) + '<br>'
-            + 'Toko bisa langsung dibuka dan login admin (buat pengguna Admin di Supabase Auth proyek itu bila belum ada).'
+            + adminBaris
             + '<br><button class="btn btn-primary" style="margin-top:10px;" onclick="window.open(\'' + esc(hasil.link) + '\', \'_blank\')">Buka Toko &rsaquo;</button>';
           hasilEl.classList.remove('hidden');
           el('namaBaru').value = '';
           el('slugBaru').value = '';
+          if (el('hubAdminEmail')) el('hubAdminEmail').value = 'admin@zpos.local';
+          if (el('hubAdminSandi')) el('hubAdminSandi').value = '';
           toast('Toko "' + nama + '" berhasil dibuat.');
         } else {
           errEl.textContent = hasil.pesan;
@@ -1100,6 +1349,8 @@ if (typeof document !== 'undefined') {
       el('logBuat').classList.add('hidden');
       el('hasilBuat').classList.add('hidden');
       el('buatErr').textContent = '';
+      if (el('adminErr')) el('adminErr').textContent = '';
+      if (el('hubAdminEmail')) el('hubAdminEmail').value = 'admin@zpos.local';
       el('areaBuat').classList.add('hidden');
       toast('Dibatalkan — token sudah dihapus dari memori.');
     });
