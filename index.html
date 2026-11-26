@@ -44,8 +44,6 @@
   .form .hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
   .form .err { font-size: 12px; color: #b91c1c; margin-top: 6px; min-height: 16px; }
   .token-warn { background: #fef3c7; border: 1px solid #f59e0b; border-radius: 10px; padding: 10px 12px; font-size: 12px; margin-top: 10px; line-height: 1.5; }
-  .mode-pilih label { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: #1f2937; margin: 8px 0; cursor: pointer; }
-  .mode-pilih input { width: auto; margin-top: 2px; }
   .log { background: #111827; color: #d1fae5; border-radius: 10px; padding: 12px 14px; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; margin-top: 12px; }
   .log .jalan { color: #fbbf24; }
   .log .ok { color: #34d399; background: none; padding: 0; }
@@ -94,7 +92,7 @@
   <div id="layarPanel" class="hidden">
     <div class="note">
       <b>Wizard "Hubungkan Supabase" sudah nyata &mdash; "Update Semua Toko" masih simulasi.</b>
-      <p>Buat Toko Baru di bawah ini benar-benar memanggil API Supabase + GitHub dari browser Bos dengan token yang ditempel Bos sendiri: buat / pakai proyek Supabase &rarr; pasang 37 tabel + migrasi &rarr; buat repo &rarr; isi config.js &rarr; deploy. Token hanya hidup di memori browser selama wizard jalan dan dihapus begitu selesai / batal / keluar &mdash; tidak pernah disimpan. Yang tetap manual: buat akun Supabase pembeli (sekali per pembeli) + buat token Management API-nya.</p>
+      <p>Buat Toko Baru di bawah ini benar-benar memanggil API Supabase + GitHub dari browser Bos dengan token yang ditempel Bos sendiri: pakai proyek Supabase yang sudah dibuat &rarr; pasang 37 tabel + migrasi &rarr; buat repo &rarr; isi config.js &rarr; deploy. Token hanya hidup di memori browser selama wizard jalan dan dihapus begitu selesai / batal / keluar &mdash; tidak pernah disimpan. Yang tetap manual: buat akun Supabase pembeli (sekali per pembeli, proyek langsung dibuat di situ) + buat token Management API-nya.</p>
       <p>Tombol "Update Semua Toko" masih simulasi sampai backend ada.</p>
     </div>
 
@@ -118,37 +116,20 @@
       <p class="hint">Slug hanya huruf kecil, angka, dan tanda -. Tidak boleh kosong, duplikat, atau memakai 'super-admin' / 'zho-pos'.</p>
 
       <p class="section" style="margin:14px 0 4px;">Hubungkan Supabase</p>
-      <div class="mode-pilih">
-        <label><input type="radio" name="modeKoneksi" value="ada" checked> <span><b>Proyek sudah ada</b> — proyek toko sudah dibuat manual di Supabase (ini kasus toko pertama).</span></label>
-        <label><input type="radio" name="modeKoneksi" value="baru"> <span><b>Buat proyek baru</b> — wizard membuatkan proyek di akun Supabase itu.</span></label>
-      </div>
-
-      <div id="grupModeAda">
-        <label>Project URL</label>
-        <input id="hubUrl" placeholder="https://abcdefghijklm.supabase.co" autocapitalize="off" autocomplete="off" spellcheck="false">
-        <p class="hint">Lihat di proyek Supabase &rarr; Settings &rarr; API &rarr; Project URL.</p>
-        <label>Publishable key</label>
-        <input id="hubKey" placeholder="sb_publishable_…" autocapitalize="off" autocomplete="off" spellcheck="false">
-        <p class="hint">Settings &rarr; API Keys &rarr; Publishable key. Kunci ini publik — aman ditempel di sini.</p>
-      </div>
-
-      <div id="grupModeBaru" class="hidden">
-        <label>Nama proyek Supabase</label>
-        <input id="hubNamaProyek" placeholder="cth: Toko Berkah">
-        <label>Organization slug / ID</label>
-        <input id="hubOrg" placeholder="cth: rafi-org" autocapitalize="off" autocomplete="off" spellcheck="false">
-        <p class="hint">Lihat di URL dashboard Supabase: supabase.com/dashboard/org/&lt;slug&gt;.</p>
-        <label>Password database</label>
-        <input id="hubDbPass" type="password" placeholder="minimal 12 karakter" autocomplete="new-password">
-        <p class="hint">Password Postgres proyek baru — simpan baik-baik, tidak bisa dilihat lagi nanti.</p>
-      </div>
+      <p class="hint">Proyek toko sudah dibuat saat akun Supabase dibuat — tempel Project URL + Publishable key proyek itu di bawah ini.</p>
+      <label>Project URL</label>
+      <input id="hubUrl" placeholder="https://abcdefghijklm.supabase.co" autocapitalize="off" autocomplete="off" spellcheck="false">
+      <p class="hint">Lihat di proyek Supabase &rarr; Settings &rarr; API &rarr; Project URL.</p>
+      <label>Publishable key</label>
+      <input id="hubKey" placeholder="sb_publishable_…" autocapitalize="off" autocomplete="off" spellcheck="false">
+      <p class="hint">Settings &rarr; API Keys &rarr; Publishable key. Kunci ini publik — aman ditempel di sini.</p>
 
       <label>Management API token (sbp_…)</label>
       <input id="hubTokenSbp" type="password" placeholder="sbp_…" autocomplete="off" spellcheck="false">
-      <p class="hint">Dashboard Supabase &rarr; klik avatar &rarr; Access Tokens &rarr; Generate new token. Token ini yang dipakai wizard untuk membuat proyek, memasang skema, dan mengambil key.</p>
+      <p class="hint">Dashboard Supabase &rarr; klik avatar &rarr; Access Tokens &rarr; Generate new token, beri nama mis. "panel-super-admin", lalu salin tokennya. Token ini yang dipakai wizard untuk memasang skema, memverifikasi tabel, dan mengambil key.</p>
       <label>Token GitHub (ghp_… / github_pat_…)</label>
       <input id="hubTokenGh" type="password" placeholder="ghp_… atau github_pat_…" autocomplete="off" spellcheck="false">
-      <p class="hint">GitHub &rarr; Settings &rarr; Developer settings &rarr; Personal access tokens &rarr; Tokens (classic) &rarr; Generate new token, scope <b>repo</b>. Dipakai wizard untuk membuat repo toko + deploy.</p>
+      <p class="hint">GitHub &rarr; Settings &rarr; Developer settings &rarr; Personal access tokens &rarr; Tokens (classic) &rarr; Generate new token, scope <b>repo</b>, beri nama mis. "panel-super-admin", lalu salin. Dipakai wizard untuk membuat repo toko + deploy.</p>
 
       <div class="token-warn"><b>Token hanya di memori browser ini.</b> Token ditempel di atas hanya dipakai selama wizard jalan — tidak disimpan di localStorage, file, atau repo, dan dihapus begitu wizard selesai, dibatalkan, atau Bos keluar. Jangan tempel token di kolom lain / chat.</div>
 

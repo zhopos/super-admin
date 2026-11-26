@@ -65,7 +65,6 @@ var LANGKAH_UPDATE = [
 var API_SUPABASE = 'https://api.supabase.com/v1';
 var API_GITHUB = 'https://api.github.com';
 var LIVE_ZPOS = 'https://zhopos.github.io/';
-var REGION_TOKO = 'ap-southeast-1'; // Singapore
 
 var SCHEMA_DATA = (typeof window !== 'undefined' && window.SCHEMA_DATA)
   || (typeof globalThis !== 'undefined' && globalThis.SCHEMA_DATA)
@@ -80,7 +79,6 @@ function skemaData() {
 // Urutan langkah wizard (URUTAN PENTING — jangan diubah sembarangan).
 var LANGKAH_WIZARD = [
   { id: 'validasi', label: 'Validasi isian (nama, slug, token)' },
-  { id: 'buat-proyek', label: 'Buat proyek Supabase baru (mode baru saja)' },
   { id: 'tes-koneksi', label: 'Tes koneksi ke Supabase' },
   { id: 'pasang-skema-1', label: 'Pasang skema — bagian 1/2 (37 tabel + RLS)' },
   { id: 'pasang-skema-2', label: 'Pasang skema — bagian 2/2 (seed + grant)' },
@@ -125,28 +123,19 @@ function urlDariRef(ref) {
   return 'https://' + String(ref || '').trim().toLowerCase() + '.supabase.co';
 }
 
-// Validasi semua isian wizard SEBELUM request apa pun. mode: 'ada' | 'baru'.
-// f: {projectUrl, publishableKey, sbpToken, githubToken, namaProyek, orgSlug, dbPass}
-function validasiKoneksi(mode, f) {
+// Validasi semua isian wizard SEBELUM request apa pun.
+// Satu mode saja: proyek toko sudah dibuat (saat akun Supabase dibuat).
+// f: {projectUrl, publishableKey, sbpToken, githubToken}
+function validasiKoneksi(f) {
   var errors = [];
   f = f || {};
-  if (mode !== 'ada' && mode !== 'baru') {
-    return { ok: false, errors: ['Mode koneksi tidak dikenal — pilih "Proyek sudah ada" atau "Buat proyek baru".'] };
-  }
-  var ref = null;
-  if (mode === 'ada') {
-    ref = refDariUrl(f.projectUrl);
-    if (!ref) errors.push('Project URL tidak valid — harus https://<ref>.supabase.co (contoh: https://abcdefghijklm.supabase.co).');
-    if (!/^sb_publishable_/.test(f.publishableKey || '')) errors.push('Publishable key tidak valid — harus diawali sb_publishable_ (salin dari Settings → API Keys → Publishable key).');
-  } else {
-    if (!String(f.namaProyek || '').trim()) errors.push('Nama proyek Supabase wajib diisi.');
-    if (!String(f.orgSlug || '').trim()) errors.push('Organization slug/ID wajib diisi (lihat di URL dashboard Supabase: supabase.com/dashboard/org/<slug>).');
-    if (String(f.dbPass || '').length < 12) errors.push('Password database minimal 12 karakter — simpan baik-baik, tidak bisa dilihat lagi nanti.');
-  }
+  var ref = refDariUrl(f.projectUrl);
+  if (!ref) errors.push('Project URL tidak valid — harus https://<ref>.supabase.co (contoh: https://abcdefghijklm.supabase.co).');
+  if (!/^sb_publishable_/.test(f.publishableKey || '')) errors.push('Publishable key tidak valid — harus diawali sb_publishable_ (salin dari Settings → API Keys → Publishable key).');
   if (!/^sbp_/.test(f.sbpToken || '')) errors.push('Management API token tidak valid — harus diawali sbp_ (buat di dashboard Supabase → Access Tokens).');
   if (!/^(ghp_|github_pat_|gho_)/.test(f.githubToken || '')) errors.push('Token GitHub tidak valid — harus token classic (ghp_…) atau fine-grained (github_pat_…) dengan scope repo.');
   if (errors.length) return { ok: false, errors: errors };
-  return { ok: true, errors: [], ref: ref, projectUrl: mode === 'ada' ? urlDariRef(ref) : null };
+  return { ok: true, errors: [], ref: ref, projectUrl: urlDariRef(ref) };
 }
 
 // config.js toko baru — format SAMA PERSIS dengan config.js ZPOS (const).
@@ -276,35 +265,6 @@ async function tesKoneksiSupabase(o, fetchImpl) {
   return { ok: true, status: j.status || j.state, nama: j.name, ref: j.ref || j.id };
 }
 
-async function buatProyekSupabase(o, fetchImpl) {
-  var r = await panggilJson(API_SUPABASE + '/projects', {
-    method: 'POST', token: o.token,
-    body: { name: o.nama, organization_id: o.orgSlug, db_pass: o.dbPass, region: REGION_TOKO, plan: 'free' }
-  }, fetchImpl);
-  if (!r.ok) return { ok: false, status: r.status, galat: r.galat, pesanServer: pesanDariRes(r) };
-  var j = r.json || {};
-  var ref = j.ref || j.id;
-  if (!ref) return { ok: false, status: r.status, pesanServer: 'Server tidak mengembalikan ref proyek.' };
-  return { ok: true, ref: ref };
-}
-
-async function tungguProyekAktif(o, fetchImpl, opt) {
-  var tunggu = (opt && opt.tunggu) || tungguMs;
-  var batas = (opt && opt.batasMs) || 10 * 60 * 1000;
-  var interval = (opt && opt.intervalMs) || 5000;
-  var mulai = Date.now();
-  for (;;) {
-    var r = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref), { token: o.token }, fetchImpl);
-    if (r.ok && r.json) {
-      var st = String(r.json.status || r.json.state || '');
-      if (st === 'ACTIVE_HEALTHY') return { ok: true, status: st };
-      if (/FAIL|ERROR/.test(st)) return { ok: false, jenisGalat: 'server', pesan: 'Proyek gagal dibuat (status: ' + st + ').' };
-    }
-    if (Date.now() - mulai > batas) return { ok: false, jenisGalat: 'timeout', pesan: 'Proyek belum ACTIVE_HEALTHY setelah 10 menit — periksa di dashboard Supabase.' };
-    await tunggu(interval);
-  }
-}
-
 async function jalankanSqlSupabase(o, fetchImpl) {
   var r = await panggilJson(API_SUPABASE + '/projects/' + encodeURIComponent(o.ref) + '/database/query', {
     method: 'POST', token: o.token, body: { query: o.query }
@@ -405,8 +365,8 @@ function hasilGagal(langkah, k) {
   return { ok: false, langkahGagal: langkah, jenisGalat: k.jenis || 'server', pesan: k.pesan || 'Gagal.' };
 }
 
-// Orkestrator wizard. input: {nama, slug, mode, projectUrl, publishableKey,
-// sbpToken, githubToken, namaProyek, orgSlug, dbPass}.
+// Orkestrator wizard. Satu mode saja: proyek sudah dibuat.
+// input: {nama, slug, projectUrl, publishableKey, sbpToken, githubToken}.
 // deps: {fetchImpl, tunggu, log(id, status, pesan), simpanToko(toko)}.
 // Berhenti di langkah pertama yang gagal. Token TIDAK PERNAH disimpan.
 async function jalankanWizard(input, deps) {
@@ -421,7 +381,7 @@ async function jalankanWizard(input, deps) {
 
   // 1. Validasi (tanpa request apa pun).
   log('validasi', 'jalan', 'Memeriksa isian…');
-  var cek = validasiKoneksi(input.mode, input);
+  var cek = validasiKoneksi(input);
   if (!cek.ok) {
     log('validasi', 'gagal', cek.errors.join(' '));
     return { ok: false, langkahGagal: 'validasi', jenisGalat: 'validasi', pesan: cek.errors.join(' ') };
@@ -431,28 +391,6 @@ async function jalankanWizard(input, deps) {
   var sbp = input.sbpToken;
   var gh = input.githubToken;
   log('validasi', 'ok', 'Isian valid.');
-
-  // Mode baru: buat proyek dulu, lalu tunggu ACTIVE_HEALTHY.
-  if (input.mode === 'baru') {
-    log('buat-proyek', 'jalan', 'Membuat proyek Supabase "' + input.namaProyek + '"…');
-    var buat = await buatProyekSupabase({ nama: input.namaProyek, orgSlug: input.orgSlug, dbPass: input.dbPass, token: sbp }, fetchImpl);
-    if (!buat.ok) {
-      var kb = klasifikasiGalatKoneksi(buat);
-      log('buat-proyek', 'gagal', kb.pesan);
-      return hasilGagal('buat-proyek', kb);
-    }
-    ref = buat.ref;
-    projectUrl = urlDariRef(ref);
-    log('buat-proyek', 'ok', 'Proyek dibuat — ref ' + ref + '. Menunggu ACTIVE_HEALTHY…');
-    var siap = await tungguProyekAktif({ ref: ref, token: sbp }, fetchImpl, { tunggu: tunggu });
-    if (!siap.ok) {
-      log('buat-proyek', 'gagal', siap.pesan);
-      return hasilGagal('buat-proyek', siap);
-    }
-    log('buat-proyek', 'ok', 'Proyek ACTIVE_HEALTHY.');
-  } else {
-    log('buat-proyek', 'info', 'Proyek sudah ada — langkah buat proyek dilewati.');
-  }
 
   // 2. Tes koneksi — gerbang utama; gagal di sini = berhenti.
   log('tes-koneksi', 'jalan', 'Menghubungi api.supabase.com…');
@@ -531,7 +469,7 @@ async function jalankanWizard(input, deps) {
     return hasilGagal('ambil-kunci', kk);
   }
   var keyDipakai = kunci.key;
-  if (input.mode === 'ada' && input.publishableKey && input.publishableKey !== keyDipakai) {
+  if (input.publishableKey && input.publishableKey !== keyDipakai) {
     log('ambil-kunci', 'info', 'Key dari API dipakai (berbeda dengan yang ditempel).');
   }
   log('ambil-kunci', 'ok', 'Publishable key didapat.');
@@ -593,7 +531,7 @@ async function jalankanWizard(input, deps) {
   // 7. Selesai — simpan toko (TANPA token).
   var toko = buatTokoWizard(nama, slug, {
     ref: ref, projectUrl: projectUrl, publishableKey: keyDipakai,
-    jumlahTabel: jumlahTabel, namaProyek: input.namaProyek
+    jumlahTabel: jumlahTabel, namaProyek: tes.nama
   });
   if (deps.simpanToko) deps.simpanToko(toko);
   log('selesai', 'ok', 'Toko tersimpan — ' + toko.link);
@@ -717,8 +655,6 @@ if (typeof module !== 'undefined' && module.exports) {
     teksKeBase64: teksKeBase64,
     bufferKeBase64: bufferKeBase64,
     tesKoneksiSupabase: tesKoneksiSupabase,
-    buatProyekSupabase: buatProyekSupabase,
-    tungguProyekAktif: tungguProyekAktif,
     jalankanSqlSupabase: jalankanSqlSupabase,
     hitungTabelSupabase: hitungTabelSupabase,
     ambilKunciSupabase: ambilKunciSupabase,
@@ -1003,21 +939,10 @@ if (typeof document !== 'undefined') {
     function bersihkanTokenSesi() {
       tokenSesi.sbp = null;
       tokenSesi.github = null;
-      ['hubTokenSbp', 'hubTokenGh', 'hubDbPass'].forEach(function (id) {
+      ['hubTokenSbp', 'hubTokenGh'].forEach(function (id) {
         var f = el(id);
         if (f) f.value = '';
       });
-    }
-
-    function modeKoneksi() {
-      var r = document.querySelector('input[name="modeKoneksi"]:checked');
-      return r ? r.value : 'ada';
-    }
-
-    function aturModeKoneksi() {
-      var mode = modeKoneksi();
-      el('grupModeAda').classList.toggle('hidden', mode !== 'ada');
-      el('grupModeBaru').classList.toggle('hidden', mode !== 'baru');
     }
 
     function tulisLogWizard(id, status, pesan) {
@@ -1045,16 +970,12 @@ if (typeof document !== 'undefined') {
       var slugAda = daftarToko.map(function (t) { return t.slug; });
       var cekSlug = validasiSlug(slug, slugAda);
       if (!cekSlug.ok) { errEl.textContent = cekSlug.alasan; return; }
-      var mode = modeKoneksi();
       var input = {
-        nama: nama, slug: cekSlug.slug, mode: mode,
+        nama: nama, slug: cekSlug.slug,
         projectUrl: el('hubUrl') ? el('hubUrl').value.trim() : '',
         publishableKey: el('hubKey') ? el('hubKey').value.trim() : '',
         sbpToken: el('hubTokenSbp').value.trim(),
-        githubToken: el('hubTokenGh').value.trim(),
-        namaProyek: el('hubNamaProyek') ? el('hubNamaProyek').value.trim() : '',
-        orgSlug: el('hubOrg') ? el('hubOrg').value.trim() : '',
-        dbPass: el('hubDbPass') ? el('hubDbPass').value : ''
+        githubToken: el('hubTokenGh').value.trim()
       };
       // Token hanya masuk memori sesi; field form dikosongkan begitu dibaca.
       tokenSesi.sbp = input.sbpToken;
@@ -1112,11 +1033,6 @@ if (typeof document !== 'undefined') {
       el('areaBuat').classList.add('hidden');
       toast('Dibatalkan — token sudah dihapus dari memori.');
     });
-
-    document.querySelectorAll('input[name="modeKoneksi"]').forEach(function (r) {
-      r.addEventListener('change', aturModeKoneksi);
-    });
-    aturModeKoneksi();
 
     el('linkSimulasi').addEventListener('click', async function (e) {
       e.preventDefault();
